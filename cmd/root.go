@@ -639,7 +639,7 @@ func countTotalLines(sources []types.LogSource) int64 {
 				return 0
 			}
 			scanner := bufio.NewScanner(f)
-			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+			scanner.Buffer(make([]byte, 64*1024), reader.MaxLineSize)
 			for scanner.Scan() {
 				total++
 			}
