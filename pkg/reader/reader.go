@@ -21,6 +21,9 @@ type LogReader interface {
 	Name() string
 }
 
+// MaxLineSize is the largest log line accepted from any source.
+const MaxLineSize = 16 * 1024 * 1024
+
 func FromSource(src types.LogSource) LogReader {
 	return fromSource(src, false)
 }
@@ -95,7 +98,7 @@ func (r *StdinReader) Read(ctx context.Context) (<-chan string, error) {
 		defer close(out)
 		fmt.Fprintln(os.Stderr, "reading log lines from stdin... (Ctrl+D to end)")
 		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 		for scanner.Scan() {
 			select {
 			case out <- scanner.Text():
@@ -166,7 +169,7 @@ func readFileLines(ctx context.Context, path string, out chan<- string) error {
 	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 	for scanner.Scan() {
 		select {
 		case out <- scanner.Text():
@@ -354,7 +357,7 @@ func execLines(ctx context.Context, cmd *exec.Cmd, out chan string) (<-chan stri
 	go func() {
 		defer close(out)
 		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 		for scanner.Scan() {
 			select {
 			case out <- scanner.Text():

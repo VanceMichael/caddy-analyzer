@@ -49,6 +49,27 @@ func TestFileReaderReadsAllLines(t *testing.T) {
 	}
 }
 
+func TestFileReaderReadsLargeLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access.log")
+	line := strings.Repeat("x", 2*1024*1024)
+	if err := os.WriteFile(path, []byte(line+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, err := FromSource(types.LogSource{Type: types.SourceFile, Path: path}).Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	got, ok := <-lines
+	if !ok {
+		t.Fatal("expected large line")
+	}
+	if got != line {
+		t.Fatalf("large line length = %d, want %d", len(got), len(line))
+	}
+}
+
 func TestFileReaderGlobExpansion(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.log"), []byte("a\n"), 0644); err != nil {
