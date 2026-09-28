@@ -230,7 +230,7 @@ Once installed, self-update with signature verification (cosign keyless + SHA256
 ```bash
 caddy-analyze update                     # install the latest verified release
 caddy-analyze update --check             # report availability only
-caddy-analyze update --version v0.7.3    # pin an exact release
+caddy-analyze update --version v0.7.4    # pin an exact release
 sudo caddy-analyze update                # when the binary is in a root-owned path
 ```
 
