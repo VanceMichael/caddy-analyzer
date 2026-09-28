@@ -3,6 +3,12 @@
 <p>Tutte le modifiche rilevanti a <code>caddy-analyzer</code> saranno documentate in questo file.</p>
 <p>Il formato si basa su <a href="https://keepachangelog.com/en/1.0.0/">Keep a Changelog</a> e questo progetto aderisce al <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
 
+<h2 id="0-7-4">0.7.4 — 2026-09-28</h2>
+<h3>Corretto</h3>
+<ul>
+<li><strong>Righe grandi nei log di accesso Caddy</strong>: accetta record fino a 16 MiB invece di fermarsi al limite di 1 MiB di <code>bufio.Scanner</code>, permettendo a <code>--detect</code> di analizzare entry con header o URI molto grandi.</li>
+</ul>
+
 <h2 id="0-7-3">0.7.3 — 2026-09-12</h2>
 <h3>Aggiunto</h3>
 <ul>
