@@ -5,7 +5,7 @@ All notable changes to `caddy-analyzer` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.4] - 2026-09-28
 
 ### Fixed
 - **Oversized Caddy access-log lines**: accept log records up to 16 MiB instead of stopping at the `bufio.Scanner` 1 MiB limit, so `--detect` can process entries with large headers or URIs.
