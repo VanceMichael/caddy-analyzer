@@ -88,7 +88,8 @@ jobs:
           curl --fail --location --retry 3 \
             --output trusted_root.json \
             https://raw.githubusercontent.com/sigstore/root-signing/main/targets/trusted_root.json
-          cosign sign-blob --yes \
+          # Preserve legacy sidecars alongside the bundle for older updaters.
+          cosign sign-blob --yes --use-signing-config=false \
             --bundle checksums.txt.bundle \
             --new-bundle-format \
             --output-signature checksums.txt.sig \
