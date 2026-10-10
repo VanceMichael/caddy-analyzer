@@ -184,12 +184,14 @@ Suspicious entries are highlighted with **zero visual noise**:
 - After the User-Agent info, a dim `→` arrow is followed by the **attack types** in severity color:
 
 ```
-21:06:07  404 WARN  GET /cms/gather/getArticle  (1.71 KB, 2.27ms) - 2.58.137.2 [macOS/Safari] → XSS · RCE
-21:06:07  404 WARN  GET /wp-content/plugins/restropress/readme.txt  (9 B, 73µs) - 2.58.137.2 [Linux/Firefox] → WP
-21:06:06  200 OK  GET /  (3.04 KB, 5.95ms) - 2.58.137.2 [macOS/Firefox]
+2026-10-08 21:06:07  404 WARN  GET /cms/gather/getArticle  (1.71 KB, 2.27ms) - 2.58.137.2 [macOS/Safari] → XSS · RCE
+2026-10-08 21:06:07  404 WARN  GET /wp-content/plugins/restropress/readme.txt  (9 B, 73µs) - 2.58.137.2 [Linux/Firefox] → WP
+2026-10-08 21:06:06  200 OK  GET /  (3.04 KB, 5.95ms) - 2.58.137.2 [macOS/Firefox]
 ```
 
 Clean entries look identical to `tail` without `--detect` — no markers, no badges, no extra lines. Works with `--defang` for safe IOC sharing.
+
+`tail` and filtered listings show `YYYY-MM-DD HH:MM:SS` for HTTP requests and operational events, so historical entries remain distinguishable across days.
 
 > **Note:** `--detect` is a local flag on `tail` (not the root-level `--detect`). Run `caddy-analyze tail --help` for details.
 
@@ -230,7 +232,7 @@ Once installed, self-update with signature verification (cosign keyless + SHA256
 ```bash
 caddy-analyze update                     # install the latest verified release
 caddy-analyze update --check             # report availability only
-caddy-analyze update --version v0.7.4    # pin an exact release
+caddy-analyze update --version v0.7.5    # pin an exact release
 sudo caddy-analyze update                # when the binary is in a root-owned path
 ```
 

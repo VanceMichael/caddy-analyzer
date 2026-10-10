@@ -38,6 +38,8 @@ caddy-analyze --format loki --remote-url https://logs.example/api/prom/push acce
 <h2 id="tail">tail</h2>
 <pre><code>caddy-analyze tail [source...] [--detect]</code></pre>
 <p>Streams entries as they arrive and colorizes status, method, path, latency and client IP. It is the interactive choice for troubleshooting a live service. <code>--detect</code> highlights matching requests inline; it does not modify the firewall. Filters still apply, so a filtered-out entry is not printed.</p>
+<p><code>tail</code> and filtered listings show <code>YYYY-MM-DD HH:MM:SS</code> for both HTTP requests and operational events, so historical entries remain distinguishable across days.</p>
+<pre><code>2026-10-08 21:19:24  404 WARN  GET /.env.production  (5.56 KB, 2.19ms) - 203.0.113.10</code></pre>
 <pre><code>caddy-analyze tail docker://caddy --detect --5xx
 caddy-analyze tail --grep '/admin|wp-login' /var/log/caddy/access.log</code></pre>
 

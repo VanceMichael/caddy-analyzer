@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Build step: injects header/sidebar/footer/TOC into docs/*.html
 // Zero deps — Node stdlib only. Handles future docs/it/* with same layout.
+// Before tagging a release: DOCS_VERSION=v0.7.5 node tools/build-docs.js
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -20,6 +21,7 @@ function exists(p) { try { fs.accessSync(p); return true; } catch { return false
 
 let cachedVersion;
 function latestVersion() {
+  if (process.env.DOCS_VERSION) return process.env.DOCS_VERSION;
   if (cachedVersion) return cachedVersion;
   try {
     cachedVersion = execFileSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'v*'], {
