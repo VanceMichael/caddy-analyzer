@@ -3,6 +3,17 @@
 <p>Tutte le modifiche rilevanti a <code>caddy-analyzer</code> saranno documentate in questo file.</p>
 <p>Il formato si basa su <a href="https://keepachangelog.com/en/1.0.0/">Keep a Changelog</a> e questo progetto aderisce al <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
 
+<h2 id="0-7-5">0.7.5 — 2026-10-10</h2>
+<h3>Modificato</h3>
+<ul>
+<li><strong>Date negli elenchi dei log (#115)</strong>: <code>tail</code> e gli elenchi filtrati mostrano ora <code>YYYY-MM-DD HH:MM:SS</code> per richieste HTTP ed eventi operativi, permettendo di distinguere i giorni nei log storici.</li>
+<li><strong>Dipendenze delle action di rilascio (#114)</strong>: aggiornate le revisioni fissate di <code>anchore/sbom-action</code> alla v0.24.3 e <code>sigstore/cosign-installer</code> alla v4.1.2 (Cosign v3.0.6).</li>
+</ul>
+<h3>Corretto</h3>
+<ul>
+<li><strong>Compatibilità del rilascio con Cosign 3</strong>: conservati i file di firma e certificato insieme al bundle Sigstore disabilitando il percorso signing-config, per mantenere la verifica con gli updater precedenti.</li>
+</ul>
+
 <h2 id="0-7-4">0.7.4 — 2026-09-28</h2>
 <h3>Corretto</h3>
 <ul>
