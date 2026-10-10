@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -145,7 +146,7 @@ func runTail(cmd *cobra.Command, args []string) error {
 }
 
 func printColorizedLog(e *types.LogEntry, det *analysis.Detector) error {
-	timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
+	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
 	statusStr := formatStatus(e.Status)
 	methodStr := lipgloss.NewStyle().Bold(true).Render(e.Method)
 	pathStr := e.Path()
@@ -241,7 +242,7 @@ func formatStatus(s int) string {
 }
 
 func printColorizedOperational(e *types.OperationalEntry) error {
-	timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
+	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
 
 	var lvlStr string
 	switch e.Level {

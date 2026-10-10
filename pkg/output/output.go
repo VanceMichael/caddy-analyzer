@@ -1127,7 +1127,7 @@ func listStatus(s int) string {
 }
 
 func FmtLogEntry(e *types.LogEntry, defang bool) string {
-	timeStr := styleListDim.Render(e.Timestamp.Format("15:04:05"))
+	timeStr := styleListDim.Render(e.Timestamp.Format(time.DateTime))
 	statusStr := listStatus(e.Status)
 	methodStr := lipgloss.NewStyle().Bold(true).Render(stripANSI(e.Method))
 	pathStr := stripANSI(e.Path())
@@ -1173,10 +1173,10 @@ func PrintLogEntries(entries []*types.LogEntry, w io.Writer, defang bool) {
 }
 
 // FmtOperationalEntry renders one non-HTTP log event for filter-driven
-// listings, mirroring the tail format: time, level, logger, message, and
+// listings, mirroring the tail format: date/time, level, logger, message, and
 // up to 3 extra fields with sorted keys for deterministic output.
 func FmtOperationalEntry(e *types.OperationalEntry, defang bool) string {
-	timeStr := styleListDim.Render(e.Timestamp.Format("15:04:05"))
+	timeStr := styleListDim.Render(e.Timestamp.Format(time.DateTime))
 	lvlStr := styleDim.Render(strings.ToUpper(e.EffectiveLevel()))
 	switch e.EffectiveLevel() {
 	case "error":
