@@ -49,6 +49,18 @@ sudo caddy-analyze guard --iptables-timeout 30s /var/log/caddy/access.log
 # Docker host needs DOCKER-USER
 sudo caddy-analyze guard --firewall-backend hybrid docker://caddy</code></pre>
 
+<h2 id="self-ip">guard — server IP protection / new bans suspended</h2>
+<p>La protezione dagli auto-ban è attiva per default dalla v0.8.0. Il rilevamento può fallire per Internet/DNS indisponibili, HTTPS in uscita bloccato, certificati non validi, entrambi i servizi indisponibili o IPv6 configurato senza accesso a Internet. Le richieste dirette ignorano il proxy HTTP; il successo IPv4 non basta se è richiesto anche il rilevamento IPv6.</p>
+<p>Un errore all'avvio impedisce a guard di partire. Durante l'esecuzione conserva gli IP protetti noti e sospende i nuovi ban, mantenendo i blocchi esistenti non correlati. L'errore mostra la causa e <code>restart with --protect-self=false to disable server IP checks</code>. Guard riprova ogni 30 secondi e prima dei successivi tentativi di ban.</p>
+<pre><code># Verifica la connettività IPv4 diretta sul server che esegue guard
+curl --noproxy '*' -4 --max-time 4 https://api.ipify.org
+# Se il server dispone di connettività IPv6
+curl --noproxy '*' -6 --max-time 4 https://api6.ipify.org
+# Disabilita il rilevamento; sostituisci l'indirizzo fidato di esempio
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Se guard gira come servizio, aggiungi <code>--protect-self=false</code> agli argomenti di avvio e riavvialo. Salta tutti i controlli automatici sugli IP del server; le whitelist esplicite restano valide. Consulta <a href="../subcommands-guard.html#self-protection">guard → protezione dall'auto-ban</a> per limiti con NAT condiviso e più connessioni WAN.</p>
+
 <h2 id="blocklist">Aggiornamento blocklist lento / non riuscito</h2>
 <pre><code>caddy-analyze blocklist list
 # behind proxy

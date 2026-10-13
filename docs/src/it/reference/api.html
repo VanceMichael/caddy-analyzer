@@ -58,18 +58,26 @@ sources := mgr.ListSources() // name, URL, count, age, status</code></pre>
 <pre><code>import "github.com/lenny-ts/caddy-analyzer/pkg/guard"
 import "github.com/lenny-ts/caddy-analyzer/pkg/guard/firewall"
 
-backend, _ := firewall.Detect(guard.LevelInfo) // auto → hybrid/docker/iptables/nftables
+ctx := context.Background()
+selfIPs, err := guard.DetectSelfIPs(ctx)
+if err != nil { log.Fatal(err) }
+backend := firewall.Detect(firewall.BackendAuto)
 g := guard.New(guard.Config{
-  Limit: 100, Window: time.Minute, Duration: 10*time.Minute,
-  Blocker: backend, GeoIP: geo, BlocklistMgr: mgr,
+  Limit: 100, Window: time.Minute, BlockDuration: 10*time.Minute,
+  FirewallBackend: backend, GeoIP: geo, BlocklistMgr: mgr,
+  StatePath: "/var/lib/caddy-analyzer/blocked.json",
   NeverBlock: []string{"10.0.0.0/8"},
-  OnAudit: func(a guard.AuditEntry){ /* log */ },
+  SelfIPs: selfIPs, SelfIPLookup: guard.DetectSelfIPs,
+  OnError: func(err error) { log.Print(err) },
+  OnAudit: func(action, ip, reason, duration string) {
+    log.Printf("%s %s %s %s", action, ip, reason, duration)
+  },
 })
-// per log line:
-if g.Evaluate(entry) == guard.BlockNow { /* iptables BLOCK */ }
-// periodic:
-blocked := g.Tick() // expires, subnet/cred-stuffing/rps checks
+// linesCh è un &lt;-chan string di righe JSON Caddy grezze.
+g.Run(ctx, linesCh, log.Printf) // rilevamento, tick, scadenze e aggiornamento IP ogni 30s
+g.FlushState()
 </code></pre>
+<p>Importa anche <code>context</code>, <code>log</code> e <code>time</code>. Diversamente dal default CLI, chi usa la libreria abilita la protezione inizializzando <code>SelfIPs</code> prima che <code>New</code> recuperi lo stato e impostando <code>SelfIPLookup</code>. Lascia entrambi vuoti per usare solo la whitelist esplicita. <code>Evaluate(line string)</code> non restituisce valori; <code>Tick(ctx)</code> restituisce i candidati bloccati se gestisci il ciclo manualmente.</p>
 <p>Lo stato persiste in <code>/var/lib/caddy-analyzer/blocked.json</code>. Consulta <a href="../architecture.html#data-flow">Architettura → flusso dei dati</a> per vedere dove si colloca guard.</p>
 
 <h2 id="reader">reader — acquisizione da sorgenti multiple</h2>

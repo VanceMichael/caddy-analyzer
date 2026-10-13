@@ -40,6 +40,10 @@ caddy-analyze blocklist init            # persist blocklist flags to config
 caddy-analyze whitelist --init          # persist never-block to /etc/caddy-analyzer/whitelist.txt</code></pre>
 <p><code>blocklist init</code> writes current <code>--no-default-blocklists / --blocklist-config / --blocklist-remove</code> into the same file so <code>guard</code> picks them up without CLI flags.</p>
 
+<h2 id="self-ip">Guard server-IP protection</h2>
+<p><code>--protect-self=true</code> is a guard-only CLI flag, not a field in <code>caddy-analyzer.json</code>. Discovered interface/public egress addresses are kept in memory and refreshed automatically; they are not written to the whitelist file. Explicit <code>--never-block</code> entries and the whitelist are still loaded at startup, so file edits require restarting guard.</p>
+<p>For an offline, proxy-only or fixed-IP deployment, put <code>--protect-self=false</code> in the guard service's startup arguments. This disables automatic server-IP discovery without disabling explicit never-block entries. Direct public discovery ignores <code>http_proxy</code>/<code>https_proxy</code>. See <a href="../subcommands-guard.html#self-protection">guard</a> and <a href="troubleshooting.html#self-ip">discovery errors</a>.</p>
+
 <h2 id="tuning">Tuning — precedence</h2>
 <p>Config file values are defaults; CLI flags override when explicitly set. The three tunables:</p>
 <div class="table-wrap"><table>

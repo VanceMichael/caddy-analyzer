@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../it/guide/configuration.html">Guida</a><span class="sep">/</span><span>Esempi</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Esempi</h1>
 <p>Attività reali, da copiare e incollare. Sostituisci <code>testdata/sample.log</code> con la tua sorgente: <a href="../sources.html">Sorgenti log</a>.</p>
 
@@ -112,6 +112,16 @@ caddy-analyze tail docker://caddy --detect</code></pre>
 caddy-analyze --max-latency 100ms --min-size 500kb testdata/sample.log
 caddy-analyze top path --slow 1s testdata/sample.log</code></pre>
 
+<h2 id="self-ban">Guard su server casalingo o VPS remota</h2>
+<pre><code># Anteprima con protezione IP del server attiva per default
+caddy-analyze guard /var/log/caddy/access.log --dry-run
+# Blocco reale: modifica il firewall; l'IP pubblico del router condiviso è protetto
+sudo caddy-analyze guard /var/log/caddy/access.log
+# VPS/rete limitata: salta il rilevamento e autorizza l'amministratore esplicitamente
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Sostituisci l'indirizzo di esempio con l'IP fidato del client/server. La protezione automatica copre gli indirizzi rilevati del server, non tutti i client legittimi. Gli errori indicano come disabilitarla; consulta <a href="../subcommands-guard.html#self-protection">guard</a>.</p>
+
 <h2 id="ops">Log operativi</h2>
 <pre><code>caddy-analyze --ops-only --level error,warn testdata/sample.log
 caddy-analyze --watch journalctl://caddy.service  # 9a scheda = Operativo</code></pre>
@@ -122,7 +132,7 @@ caddy-analyze --watch journalctl://caddy.service  # 9a scheda = Operativo</code>
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#debug-5xx" class="toc-link">Debug dei 5xx dopo un deploy</a><a href="#hunt-bots" class="toc-link">Caccia a bot e scanner</a><a href="#geo" class="toc-link">Geo — da dove arriva il traffico</a><a href="#forensics" class="toc-link">Analisi forense con --detect</a><a href="#perf" class="toc-link">Endpoint lenti</a><a href="#ops" class="toc-link">Log operativi</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#debug-5xx" class="toc-link">Debug dei 5xx dopo un deploy</a><a href="#hunt-bots" class="toc-link">Caccia a bot e scanner</a><a href="#geo" class="toc-link">Geo — da dove arriva il traffico</a><a href="#forensics" class="toc-link">Analisi forense con --detect</a><a href="#perf" class="toc-link">Endpoint lenti</a><a href="#self-ban" class="toc-link">Guard su server casalingo o VPS remota</a><a href="#ops" class="toc-link">Log operativi</a></nav>
 </div>
 <script src="../../docs.min.js?v=36"></script>
 </body>

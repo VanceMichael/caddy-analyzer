@@ -203,6 +203,11 @@ type Config struct {
 	OnError             func(error)
 	StatePath           string
 	NeverBlock          []string
+	// SelfIPs seeds server address protection before restoring saved bans.
+	SelfIPs []string
+	// SelfIPLookup refreshes server addresses before each new ban and every
+	// 30 seconds in Run. Lookup failures suspend new automatic bans.
+	SelfIPLookup        func(context.Context) ([]string, error)
 	TrustForwarded      bool
 	SubnetLimit         int
 	AnomalyFactor       float64
@@ -267,6 +272,8 @@ type Guard struct {
 	state          *stateFile
 	expiries       map[string]time.Time
 	allowlist      []*net.IPNet
+	selfIPs        []net.IP
+	selfMu         sync.RWMutex
 	detectCounts   map[string]int
 	initial        []expiryEntry
 	sliding        *slidingCounters
@@ -526,6 +533,11 @@ func New(cfg Config) *Guard {
 	if cfg.UARotationThreshold > 0 {
 		g.detector.SetUARotationThreshold(cfg.UARotationThreshold)
 	}
+	for _, s := range cfg.SelfIPs {
+		if ip := net.ParseIP(s); ip != nil {
+			g.selfIPs = append(g.selfIPs, ip)
+		}
+	}
 	// Ensure firewall chain exists and validate before loading state.
 	// The firewall.Backend interface includes EnsureChain and Validate.
 	if !cfg.DryRun {
@@ -573,6 +585,9 @@ func parseCIDRList(list []string) []*net.IPNet {
 }
 
 func (g *Guard) isAllowlisted(ip string) bool {
+	if g.isSelfIP(ip) {
+		return true
+	}
 	if len(g.allowlist) == 0 {
 		return false
 	}
@@ -633,6 +648,10 @@ func (g *Guard) loadState() {
 	now := time.Now()
 	for _, e := range entries {
 		switch {
+		case g.isAllowlisted(e.IP):
+			// Keep failed removals tracked for retry; never recreate this ban.
+			g.blocked[e.IP] = true
+			g.expiries[e.IP] = e.When
 		case e.When.IsZero():
 			// Permanent block: always restore, regardless of current duration.
 			g.blocked[e.IP] = true
@@ -679,6 +698,7 @@ func (g *Guard) loadState() {
 			g.initial = append(g.initial, expiryEntry{ip: e.IP, when: e.When})
 		}
 	}
+	g.clearProtectedBlocks()
 }
 
 // saveStateDebounced marks the state dirty and flushes at most once per
@@ -901,7 +921,9 @@ func (g *Guard) checkImmediateBlock(ip string) bool {
 			c := &Candidate{IP: ip, Count: 1, Why: "blocklist: " + source}
 			ctx, cancel := context.WithTimeout(context.Background(), iptablesTimeout)
 			defer cancel()
-			g.block(ctx, *c, time.Now())
+			if !g.block(ctx, *c, time.Now()) {
+				return false
+			}
 			g.blocklistHits.Add(1)
 			g.pendingBlock = c
 			return true
@@ -913,7 +935,9 @@ func (g *Guard) checkImmediateBlock(ip string) bool {
 			c := &Candidate{IP: ip, Count: 1, Why: "country-block: " + info.CountryCode}
 			ctx, cancel := context.WithTimeout(context.Background(), iptablesTimeout)
 			defer cancel()
-			g.block(ctx, *c, time.Now())
+			if !g.block(ctx, *c, time.Now()) {
+				return false
+			}
 			g.blocklistHits.Add(1)
 			g.pendingBlock = c
 			return true
@@ -1056,6 +1080,11 @@ func (g *Guard) detectAnomaly() {
 }
 
 func (g *Guard) block(ctx context.Context, c Candidate, now time.Time) bool {
+	// ponytail: serial HTTPS checks per candidate; batch lookups if ban volume
+	// makes this a bottleneck. A cached address alone can ban us after a WAN change.
+	if !g.refreshSelfIPs(ctx) || g.isAllowlisted(c.IP) {
+		return false
+	}
 	g.setBlocked(c.IP)
 	if !g.cfg.DryRun {
 		if err := g.blocker.Block(c.IP); err != nil {
@@ -1128,6 +1157,12 @@ func (g *Guard) runExpiryLoop(ctx context.Context) {
 			var requeue []expiryEntry
 			for h.Len() > 0 && !h[0].when.After(now) {
 				e := heap.Pop(&h).(expiryEntry)
+				g.mu.Lock()
+				expiry, tracked := g.expiries[e.ip]
+				g.mu.Unlock()
+				if !tracked || expiry.After(e.when) {
+					continue // Removed by self-IP protection or superseded by a new ban.
+				}
 				if !g.cfg.DryRun {
 					if err := g.blocker.Unblock(e.ip); err != nil {
 						if g.cfg.OnError != nil {
@@ -1186,6 +1221,12 @@ func (g *Guard) Run(ctx context.Context, linesCh <-chan string, logf func(string
 
 	ticker := time.NewTicker(g.cfg.Window)
 	defer ticker.Stop()
+	var selfTick <-chan time.Time
+	if g.cfg.SelfIPLookup != nil {
+		selfTicker := time.NewTicker(30 * time.Second)
+		defer selfTicker.Stop()
+		selfTick = selfTicker.C
+	}
 
 	for {
 		select {
@@ -1215,6 +1256,8 @@ func (g *Guard) Run(ctx context.Context, linesCh <-chan string, logf func(string
 				}
 				logf("[%s] + %s %s (%s)\n", now.Format("15:04:05"), c.IP, verb, c.Why)
 			}
+		case <-selfTick:
+			g.refreshSelfIPs(ctx)
 
 		case <-ctx.Done():
 			wg.Wait()

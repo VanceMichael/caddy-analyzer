@@ -17,6 +17,10 @@
 </table></div>
 <div class="callout callout-warning"><div class="callout-label">Do not lock yourself out</div>Every <code>guard</code> example that modifies firewall is marked <span class="pill pill-danger">modifies firewall</span>. On a remote host, always <code>--never-block YOUR_IP</code>. When in doubt, use read-only commands (<code>blocklist list</code>, <code>--detect -f html</code>) first.</div>
 
+<h2 id="self-protection">Self-ban protection and false positives</h2>
+<p>Guard's default <code>--protect-self=true</code> exempts discovered server interface/public egress IPs, including dynamic addresses and covering subnet bans. It does not classify every periodic request as safe or automatically trust other users. Shared-NAT sources arriving with the protected public address share the exemption. Explicit administrator IPs still belong in <code>--never-block</code>/<code>whitelist</code>; Fail2Ban and manual <code>block</code> commands are separate.</p>
+<p>Discovery needs direct HTTPS. Failure stops startup or suspends new bans, with an error explaining <code>--protect-self=false</code>. Disable it and use explicit whitelist entries for restricted networks. See <a href="subcommands-guard.html#self-protection">guard</a> for refresh, saved-ban cleanup and scope.</p>
+
 <h2 id="what">What it does</h2>
 <ul>
   <li><strong>Dual-pass engine</strong> — every URI is checked raw and URL-unescaped (split <code>?</code> + <code>PathUnescape</code>/<code>QueryUnescape</code> + manual <code>%</code> fallback) to catch <code>%2e%2e</code> and double-encode bypass. Guard runs the same <code>Detector</code> per window.</li>

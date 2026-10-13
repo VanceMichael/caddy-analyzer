@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="reference/cli.html">Reference</a><span class="sep">/</span><span>guard</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>guard</h1>
 <p>Tail a log source and auto-block IPs that exceed thresholds. Normal runs <span class="pill pill-danger">modify the firewall</span> — every run can add <code>iptables</code>/<code>nftables</code>/<code>DOCKER-USER</code> rules. Use <code>--dry-run</code> to execute detection without firewall or state-file changes.</p>
 
@@ -107,6 +107,7 @@
 <tr><td><code>--no-auto-download</code></td><td></td><td>false</td><td>Disable GeoIP auto-download</td></tr>
 <tr><td><code>--never-block</code></td><td></td><td></td><td>CIDRs/IPs never block (protect your IP!)</td></tr>
 <tr><td><code>--never-block-file</code></td><td></td><td></td><td>File with CIDRs (one per line, # comment)</td></tr>
+<tr><td><code>--protect-self</code></td><td></td><td>true</td><td>Discover and protect server interface/public egress IPs; <code>--protect-self=false</code> disables these checks</td></tr>
 <tr><td><code>--audit-log</code></td><td></td><td>/var/log/…-audit.jsonl</td><td>JSON lines audit (0600)</td></tr>
 <tr><td><code>--audit-syslog</code></td><td></td><td></td><td>Forward audit events to a syslog UDP address</td></tr>
 <tr><td><code>--webhook-url</code> / <code>--audit-webhook</code></td><td></td><td></td><td>Async webhook notification; provider: generic, slack, discord, pagerduty</td></tr>
@@ -122,11 +123,23 @@
 </tbody>
 </table></div>
 
+<h2 id="self-protection">Automatic self-ban protection</h2>
+<p>Since v0.8.0, <code>--protect-self=true</code> protects the server's interface and public egress addresses by default. This includes requests from processes sharing the same home router/NAT. Discovery runs at startup, every 30 seconds and again before each new ban, so a WAN address change is checked before blocking. A successful refresh replaces old addresses; it does not append entries to the whitelist file.</p>
+<p>Protection takes precedence over request/auth/404 thresholds, pattern detection, blocklist feeds, country rules and subnet bans containing a server address. Existing tracked rules covering a protected address are removed from the firewall and saved state. Failed removals remain tracked for retry. Dry-run reports <code>would_unblock</code> without changing either.</p>
+<p>Public discovery uses direct, family-specific HTTPS requests to ipify, with icanhazip as fallback. HTTP proxy settings are ignored. Each request has a 4-second timeout and discovery has a 10-second overall limit. A failure in any required family, including IPv6 configured without Internet connectivity, fails the check. Before-ban checks are synchronous and add latency.</p>
+<p>If discovery fails at startup, guard refuses to start; runtime failures retain known protected addresses and suspend new bans until discovery recovers. Both errors instruct you to restart with <code>--protect-self=false</code>. See <a href="guide/troubleshooting.html#self-ip">Troubleshooting → server IP protection</a>.</p>
+<p>On a remote VPS, the administrator's home/mobile IP is usually different from the server's IP: add it separately with <code>--never-block</code> or <code>whitelist</code>. Shared-NAT sources receive the same public-IP exemption; a different device's IPv6 address is not automatically protected. Run guard on the same network/egress path as the processes being protected. This feature does not change Fail2Ban or prevent explicit manual <code>block</code> commands.</p>
+
 <h2 id="minimal">Minimal example</h2>
-<p><span class="pill pill-danger">modifies firewall</span> — blocks real IPs. Allowlist your IP first if on a remote host.</p>
-<pre><code># allowlist yourself, then run guard on auto-discovered source
-MY_IP=$(curl -s ifconfig.me)
-sudo caddy-analyze guard --never-block $MY_IP --limit 50 --window 1m /var/log/caddy/access.log</code></pre>
+<p><span class="pill pill-danger">modifies firewall</span> — server addresses are protected automatically. For remote administration, also allowlist the client IP.</p>
+<pre><code># Replace this with the public IP of your administrator workstation, not the VPS
+ADMIN_IP=203.0.113.10
+sudo caddy-analyze guard --never-block "$ADMIN_IP" --limit 50 --window 1m /var/log/caddy/access.log</code></pre>
+
+<h3 id="restricted-network">Fixed-IP or restricted-network server</h3>
+<p><span class="pill pill-danger">modifies firewall</span> — disable server-IP discovery and keep explicit trusted addresses. This skips both interface and public-IP checks, not the explicit whitelist.</p>
+<pre><code>sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
 
 <h2 id="advanced">Advanced example</h2>
 <p><span class="pill pill-danger">modifies firewall</span> — hybrid backend + country + persistent state. To safely preview the same logic, add <code>--dry-run</code>; the terminal shows would-be blocks and the audit sink receives <code>would_block</code> events.</p>
@@ -144,7 +157,7 @@ sudo caddy-analyze guard docker://caddy \
 sudo caddy-analyze unban --list
 cat /var/log/caddy-analyzer-audit.jsonl | tail</code></pre>
 
-<div class="callout callout-warning"><div class="callout-label">Do not lock yourself out</div>On a remote VM, always pass <code>--never-block $(curl -s ifconfig.me)</code> or your office CIDR. Use <code>--dry-run</code> to preview blocks; it reads existing state but does not restore rules or write changes.</div>
+<div class="callout callout-warning"><div class="callout-label">Remote administrator access</div>Automatic protection covers the server, not every administrator connection. Obtain your workstation's public IP on that workstation and pass it with <code>--never-block</code>. Use <code>--dry-run</code> to preview decisions; it still performs self-IP discovery unless disabled. Whitelist-file changes require restarting guard.</div>
       <footer class="footer">
   <p>caddy-analyzer is open-source under <a href="https://github.com/lenny-ts/caddy-analyzer/blob/main/LICENSE">MIT</a> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a> · <a href="changelog.html">Changelog</a></p>
 </footer>
@@ -152,7 +165,7 @@ cat /var/log/caddy-analyzer-audit.jsonl | tail</code></pre>
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#synopsis" class="toc-link">Synopsis</a><a href="#flags" class="toc-link">Flags</a><a href="#minimal" class="toc-link">Minimal example</a><a href="#advanced" class="toc-link">Advanced example</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#synopsis" class="toc-link">Synopsis</a><a href="#flags" class="toc-link">Flags</a><a href="#self-protection" class="toc-link">Automatic self-ban protection</a><a href="#minimal" class="toc-link">Minimal example</a><a href="#restricted-network" class="toc-link h3">Fixed-IP or restricted-network server</a><a href="#advanced" class="toc-link">Advanced example</a></nav>
 </div>
 <script src="docs.min.js?v=36"></script>
 </body>

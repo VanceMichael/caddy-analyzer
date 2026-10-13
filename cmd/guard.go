@@ -41,6 +41,7 @@ var (
 	guardNoAutoDL          bool
 	guardFirewallBackend   string
 	guardDryRun            bool
+	guardProtectSelf       bool
 	guardNotify            auditNotifyFlags
 )
 
@@ -76,6 +77,8 @@ func init() {
 		"Firewall backend: auto, iptables, docker, nftables, hybrid (auto-detects Docker/nftables)")
 	guardCmd.Flags().BoolVar(&guardDryRun, "dry-run", false,
 		"Evaluate and report blocks without changing the firewall or state file")
+	guardCmd.Flags().BoolVar(&guardProtectSelf, "protect-self", true,
+		"Automatically protect server interface/public IPs from bans (requires HTTPS IP discovery)")
 	rootCmd.AddCommand(guardCmd)
 }
 
@@ -91,6 +94,13 @@ Detection:
   • Pattern detection — 26 categories: SQLi, NoSQLi, XSS, SSTI, SSRF, RCE, path traversal, LFI wrappers, GraphQL, Log4j/JNDI, XXE, open redirect, LDAP/XPath/CRLF/SSI injection, prototype pollution, probes, scanners, UA rotation, JWT abuse, object enumeration, beaconing (confidence >= --detect-confidence)
   • Blocklist feeds (Spamhaus DROP, FireHOL, CINS, Tor, Emerging Threats, AbuseIPDB) — immediate block
   • Country block (--country-block) — immediate block by GeoIP country code
+
+Self-ban protection (enabled by default):
+  • Discover server interface/public IPs at startup, every 30s and before bans
+  • Protect these addresses from all automatic bans, including covering subnets
+  • Discovery requires direct HTTPS; failures stop startup or suspend new bans
+  • Use --protect-self=false to skip server-IP checks; explicit whitelists still apply
+  • Remote administrators on another connection need their own --never-block entry
 
 Set any threshold to 0 to disable it. Blockade is temporary (default 10m).
 For permanent block: --duration 0. Rules live in the CADDY_ANALYZER iptables
@@ -287,6 +297,15 @@ func runGuard(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown firewall backend %q: use auto, iptables, docker, nftables, or hybrid", guardFirewallBackend)
 	}
 
+	var selfIPs []string
+	var selfLookup func(context.Context) ([]string, error)
+	if guardProtectSelf {
+		selfLookup = guard.DetectSelfIPs
+		selfIPs, err = selfLookup(ctx)
+		if err != nil {
+			return fmt.Errorf("server IP protection: %w; restart with --protect-self=false to disable server IP checks", err)
+		}
+	}
 	g := guard.New(guard.Config{
 		Limit:               guardLimit,
 		AuthLimit:           guardAuthLimit,
@@ -301,6 +320,8 @@ func runGuard(cmd *cobra.Command, args []string) error {
 		},
 		StatePath:           guardStateFile,
 		NeverBlock:          neverBlock,
+		SelfIPs:             selfIPs,
+		SelfIPLookup:        selfLookup,
 		TrustForwarded:      flagTrustXFF,
 		SubnetLimit:         guardSubnetLimit,
 		AnomalyFactor:       guardAnomalyFactor,
@@ -332,6 +353,9 @@ func runGuard(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "Guard %s — %s | %s | %s / %s | block: %s\n", mode,
 		thr("auth", guardAuthLimit), thr("404", guardNotFoundLimit), thr("total", guardLimit), guardWindow, durMsg)
 	fmt.Fprintf(os.Stderr, "Firewall backend: %s\n", fwBackend.Name())
+	if guardProtectSelf {
+		fmt.Fprintf(os.Stderr, "Server IP protection: %s (refresh every 30s and before bans)\n", strings.Join(selfIPs, ", "))
+	}
 	if guardDetectConfidence > 0 {
 		fmt.Fprintf(os.Stderr, "Pattern detection blocking: confidence >= %d\n", guardDetectConfidence)
 	} else {

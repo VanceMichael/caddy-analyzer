@@ -65,6 +65,7 @@ caddy-analyze --against baseline.json access.log --threshold 15</code></pre>
 <h2 id="guard">guard</h2>
 <pre><code>sudo caddy-analyze guard [source] [flags]</code></pre>
 <p>Monitora continuamente una sorgente e blocca automaticamente gli IP che superano le soglie di richieste, autenticazione, 404 o detection. In base a <code>--firewall-backend</code> può modificare iptables, nftables, la catena Docker <code>DOCKER-USER</code> o una combinazione. I blocchi possono essere persistiti e ogni azione può essere registrata.</p>
+<p><code>--protect-self=true</code> rileva e protegge gli IP delle interfacce e di uscita pubblica del server all'avvio, ogni 30 secondi e prima dei nuovi ban. Rimuove anche i ban tracciati che coprono questi indirizzi. Un errore impedisce l'avvio o sospende i nuovi ban durante l'esecuzione; il messaggio indica di riavviare con <code>--protect-self=false</code> per saltare i controlli. Le whitelist esplicite restano valide. Consulta <a href="../subcommands-guard.html#self-protection">protezione automatica dall'auto-ban</a> per requisiti di rete e accesso amministratore remoto.</p>
 <div class="callout callout-danger"><div class="callout-label">Sicurezza firewall</div>Proteggi il tuo IP con <code>--never-block</code> o <code>--never-block-file</code> prima di eseguire il comando su un host remoto. Prova prima <code>--dry-run</code>. La modalità normale richiede root; la simulazione non modifica firewall o stato.</div>
 <pre><code>sudo caddy-analyze guard /var/log/caddy/access.log --dry-run
 sudo caddy-analyze guard docker://caddy --never-block 203.0.113.10 \
@@ -111,7 +112,7 @@ caddy-analyze export-sigma - | sigma check</code></pre>
 <p>Controlla e installa una release verificata da GitHub. L'installazione è fail-closed: cosign deve validare il manifest firmato e l'hash dell'archivio deve corrispondere. <code>--check</code> non installa, <code>--version</code> fissa un tag, <code>--force</code> consente reinstallazione o downgrade e <code>--install-dir</code> sceglie la directory. Se la verifica fallisce il binario corrente resta intatto.</p>
 <pre><code>caddy-analyze update --check
 sudo caddy-analyze update
-caddy-analyze update --version v0.7.0 --install-dir ~/.local/bin</code></pre>
+caddy-analyze update --version v0.8.0 --install-dir ~/.local/bin</code></pre>
 
 <h2 id="completion">completion e versione</h2>
 <pre><code>caddy-analyze --version
@@ -217,6 +218,7 @@ sudo caddy-analyze guard access.log --never-block-file whitelist.txt</code></pre
 <tr><td><code>--cache-dir</code></td><td>cache utente</td><td>Directory dei feed cache.</td></tr>
 <tr><td><code>--never-block</code></td><td>nessuno</td><td>IP/CIDR da proteggere sempre; ripetibile.</td></tr>
 <tr><td><code>--never-block-file</code></td><td>nessuno</td><td>File con un IP/CIDR per riga e commenti <code>#</code>.</td></tr>
+<tr><td><code>--protect-self</code></td><td>true</td><td>Protegge automaticamente gli IP delle interfacce e di uscita pubblica. <code>--protect-self=false</code> disabilita il rilevamento e i relativi controlli prima del ban.</td></tr>
 <tr><td><code>--state-file</code></td><td><code>/var/lib/caddy-analyzer/blocked.json</code></td><td>Persistenza e recupero dei blocchi dopo un riavvio; vuoto disabilita.</td></tr>
 <tr><td><code>--iptables-timeout</code></td><td>10s</td><td>Timeout di ogni invocazione firewall.</td></tr>
 <tr><td><code>--subnet-limit</code></td><td>0</td><td>Blocca una rete /24 o /64 quando le richieste distribuite superano la soglia.</td></tr>

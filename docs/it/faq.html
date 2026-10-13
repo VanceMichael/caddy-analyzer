@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../it/index.html">Panoramica</a><span class="sep">/</span><span>FAQ</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>FAQ</h1>
 <p>Da issue GitHub, discussioni sulle PR e domande emerse durante la scrittura della documentazione. Meglio poche domande valide che un numero tondo di riempitivi.</p>
 
@@ -90,6 +90,10 @@
 
 <h2 id="guard-not-blocking">Guard e in esecuzione ma non blocca: perche?</h2>
 <p>Causa comune: Caddy e in Docker e guard usa <code>iptables</code> (INPUT), mentre il traffico passa da <code>DOCKER-USER</code>. Usa <code>--firewall-backend hybrid</code> o <code>auto</code> (rileva Docker). Controlla <code>--detect-confidence 8</code>: gli hit a bassa confidenza non vengono bloccati. Controlla <code>--never-block</code>: il tuo IP potrebbe essere nella allowlist. Consulta <a href="subcommands-guard.html">guard</a> e <a href="guide/troubleshooting.html#iptables">Risoluzione dei problemi → iptables</a>.</p>
+
+<h2 id="self-ban">Guard può bannare il proprio server dopo il riavvio del router?</h2>
+<p>Con il default <code>--protect-self=true</code>, guard rileva gli IP delle interfacce e di uscita pubblica e li verifica nuovamente prima di applicare un nuovo ban, comprese le subnet che contengono l'indirizzo. Un aggiornamento riuscito sostituisce gli IP precedenti e rimuove i ban tracciati che coprono quello nuovo. Protegge il traffico con lo stesso IP pubblico, non ogni utente legittimo: altre connessioni amministratore e gli IPv6 distinti dei dispositivi richiedono voci whitelist esplicite.</p>
+<p>Se il rilevamento fallisce, l'errore indica di riavviare con <code>--protect-self=false</code>. L'avvio si interrompe; durante l'esecuzione i nuovi ban vengono sospesi fino al recupero. Il controllo richiede HTTPS diretto in uscita e ignora il proxy. Consulta <a href="guide/troubleshooting.html#self-ip">errori di rilevamento IP del server</a>.</p>
 
 <h2 id="docker-no-logs">Perche <code>docker://caddy</code> non mostra log?</h2>
 <p>Due correzioni dalla <a href="changelog.html">0.5.1</a>: Caddy scrive gli access log su stderr e il reader ora unisce stdout+stderr. Se e ancora vuoto: controlla il nome con <code>docker ps | grep caddy</code> e l'output grezzo con <code>docker logs caddy --tail 5</code>. Controlla anche i permessi di <code>docker.sock</code> (<code>sudo usermod -aG docker $USER</code>).</p>
@@ -112,7 +116,7 @@
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#watch-vs-follow" class="toc-link">Qual e la differenza tra --watch, --follow e tail?</a><a href="#ip-filter-zero" class="toc-link">Perche --ip 10.0.0.1 restituisce 0 risultati quando il log contiene chiaramente quell'IP?</a><a href="#country-zero" class="toc-link">Perche --country IT restituisce 0?</a><a href="#guard-not-blocking" class="toc-link">Guard e in esecuzione ma non blocca: perche?</a><a href="#docker-no-logs" class="toc-link">Perche docker://caddy non mostra log?</a><a href="#detect-vs-guard" class="toc-link">--detect blocca gli IP?</a><a href="#large-log-memory" class="toc-link">Un log da 1M righe causa OOM?</a><a href="#update-cosign" class="toc-link">Perche update richiede cosign?</a><a href="#country-block-fail" class="toc-link">Perche --country-block CN genera un errore all'avvio?</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#watch-vs-follow" class="toc-link">Qual e la differenza tra --watch, --follow e tail?</a><a href="#ip-filter-zero" class="toc-link">Perche --ip 10.0.0.1 restituisce 0 risultati quando il log contiene chiaramente quell'IP?</a><a href="#country-zero" class="toc-link">Perche --country IT restituisce 0?</a><a href="#guard-not-blocking" class="toc-link">Guard e in esecuzione ma non blocca: perche?</a><a href="#self-ban" class="toc-link">Guard può bannare il proprio server dopo il riavvio del router?</a><a href="#docker-no-logs" class="toc-link">Perche docker://caddy non mostra log?</a><a href="#detect-vs-guard" class="toc-link">--detect blocca gli IP?</a><a href="#large-log-memory" class="toc-link">Un log da 1M righe causa OOM?</a><a href="#update-cosign" class="toc-link">Perche update richiede cosign?</a><a href="#country-block-fail" class="toc-link">Perche --country-block CN genera un errore all'avvio?</a></nav>
 </div>
 <script src="../docs.min.js?v=36"></script>
 </body>

@@ -85,7 +85,7 @@ var (
 	customPatterns     []analysis.DetectionPattern
 )
 
-var Version = "0.7.5-dev"
+var Version = "0.8.0-dev"
 
 var rootCmd = &cobra.Command{
 	Use:          "caddy-analyze [flags] [source...]",

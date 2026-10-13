@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../it/guide/configuration.html">Guida</a><span class="sep">/</span><span>Risoluzione dei problemi</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Risoluzione dei problemi</h1>
 
 <h2 id="permission-denied">permission denied durante la lettura di /var/log/caddy/access.log</h2>
@@ -126,6 +126,18 @@ sudo caddy-analyze guard --iptables-timeout 30s /var/log/caddy/access.log
 # Docker host needs DOCKER-USER
 sudo caddy-analyze guard --firewall-backend hybrid docker://caddy</code></pre>
 
+<h2 id="self-ip">guard — server IP protection / new bans suspended</h2>
+<p>La protezione dagli auto-ban è attiva per default dalla v0.8.0. Il rilevamento può fallire per Internet/DNS indisponibili, HTTPS in uscita bloccato, certificati non validi, entrambi i servizi indisponibili o IPv6 configurato senza accesso a Internet. Le richieste dirette ignorano il proxy HTTP; il successo IPv4 non basta se è richiesto anche il rilevamento IPv6.</p>
+<p>Un errore all'avvio impedisce a guard di partire. Durante l'esecuzione conserva gli IP protetti noti e sospende i nuovi ban, mantenendo i blocchi esistenti non correlati. L'errore mostra la causa e <code>restart with --protect-self=false to disable server IP checks</code>. Guard riprova ogni 30 secondi e prima dei successivi tentativi di ban.</p>
+<pre><code># Verifica la connettività IPv4 diretta sul server che esegue guard
+curl --noproxy '*' -4 --max-time 4 https://api.ipify.org
+# Se il server dispone di connettività IPv6
+curl --noproxy '*' -6 --max-time 4 https://api6.ipify.org
+# Disabilita il rilevamento; sostituisci l'indirizzo fidato di esempio
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Se guard gira come servizio, aggiungi <code>--protect-self=false</code> agli argomenti di avvio e riavvialo. Salta tutti i controlli automatici sugli IP del server; le whitelist esplicite restano valide. Consulta <a href="../subcommands-guard.html#self-protection">guard → protezione dall'auto-ban</a> per limiti con NAT condiviso e più connessioni WAN.</p>
+
 <h2 id="blocklist">Aggiornamento blocklist lento / non riuscito</h2>
 <pre><code>caddy-analyze blocklist list
 # behind proxy
@@ -150,7 +162,7 @@ caddy-analyze --country IT testdata/sample.log  # if 0, GeoIP missing</code></pr
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#permission-denied" class="toc-link">permission denied durante la lettura di /var/log/caddy/access.log</a><a href="#docker-sock" class="toc-link">Impossibile connettersi al demone Docker / docker.sock: permission denied</a><a href="#k8s" class="toc-link">k8s:// — pod inesistente / impossibile elencare la risorsa</a><a href="#journalctl" class="toc-link">journalctl:// — Nessun file journal</a><a href="#geoip" class="toc-link">GeoIP — country/asn vuoti o download non riuscito</a><a href="#iptables" class="toc-link">guard — iptables: permission denied / Nessuna chain/target</a><a href="#blocklist" class="toc-link">Aggiornamento blocklist lento / non riuscito</a><a href="#no-output" class="toc-link">Nessun output / report vuoto</a><a href="#still-stuck" class="toc-link">Problema non risolto?</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#permission-denied" class="toc-link">permission denied durante la lettura di /var/log/caddy/access.log</a><a href="#docker-sock" class="toc-link">Impossibile connettersi al demone Docker / docker.sock: permission denied</a><a href="#k8s" class="toc-link">k8s:// — pod inesistente / impossibile elencare la risorsa</a><a href="#journalctl" class="toc-link">journalctl:// — Nessun file journal</a><a href="#geoip" class="toc-link">GeoIP — country/asn vuoti o download non riuscito</a><a href="#iptables" class="toc-link">guard — iptables: permission denied / Nessuna chain/target</a><a href="#self-ip" class="toc-link">guard — server IP protection / new bans suspended</a><a href="#blocklist" class="toc-link">Aggiornamento blocklist lento / non riuscito</a><a href="#no-output" class="toc-link">Nessun output / report vuoto</a><a href="#still-stuck" class="toc-link">Problema non risolto?</a></nav>
 </div>
 <script src="../../docs.min.js?v=36"></script>
 </body>

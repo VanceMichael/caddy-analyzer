@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../guide/configuration.html">Guide</a><span class="sep">/</span><span>Troubleshooting</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Troubleshooting</h1>
 
 <h2 id="permission-denied">permission denied reading /var/log/caddy/access.log</h2>
@@ -126,6 +126,18 @@ sudo caddy-analyze guard --iptables-timeout 30s /var/log/caddy/access.log
 # Docker host needs DOCKER-USER
 sudo caddy-analyze guard --firewall-backend hybrid docker://caddy</code></pre>
 
+<h2 id="self-ip">guard — server IP protection / new bans suspended</h2>
+<p>Self-IP protection is enabled by default since v0.8.0. Discovery can fail because Internet/DNS is unavailable, outbound HTTPS is blocked, certificates fail validation, both discovery services fail, or configured IPv6 cannot reach the Internet. Direct requests ignore HTTP proxy settings; IPv4 success alone is insufficient if IPv6 discovery is also required.</p>
+<p>Startup failure stops guard. Runtime failure retains known protected IPs and suspends new bans, leaving existing unrelated bans in place. The error includes the cause and <code>restart with --protect-self=false to disable server IP checks</code>. Guard retries on its 30-second refresh and before subsequent ban attempts.</p>
+<pre><code># Check direct IPv4 connectivity (run on the guard server)
+curl --noproxy '*' -4 --max-time 4 https://api.ipify.org
+# If the server has IPv6 connectivity
+curl --noproxy '*' -6 --max-time 4 https://api6.ipify.org
+# Disable server-IP discovery; replace the example trusted address
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Add <code>--protect-self=false</code> to the service's startup arguments and restart it if guard runs as a service. This skips all automatic server-IP checks; explicit whitelist entries still apply. See <a href="../subcommands-guard.html#self-protection">guard → self-ban protection</a> for scope and shared-NAT/multiple-WAN limitations.</p>
+
 <h2 id="blocklist">blocklist refresh slow / fails</h2>
 <pre><code>caddy-analyze blocklist list
 # behind proxy
@@ -150,7 +162,7 @@ caddy-analyze --country IT testdata/sample.log  # if 0, GeoIP missing</code></pr
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#permission-denied" class="toc-link">permission denied reading /var/log/caddy/access.log</a><a href="#docker-sock" class="toc-link">Cannot connect to the Docker daemon / docker.sock: permission denied</a><a href="#k8s" class="toc-link">k8s:// — no such pod / cannot list resource</a><a href="#journalctl" class="toc-link">journalctl:// — No journal files</a><a href="#geoip" class="toc-link">GeoIP — country/asn empty or download fails</a><a href="#iptables" class="toc-link">guard — iptables: permission denied / No chain/target</a><a href="#blocklist" class="toc-link">blocklist refresh slow / fails</a><a href="#no-output" class="toc-link">No output / empty report</a><a href="#still-stuck" class="toc-link">Still stuck?</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#permission-denied" class="toc-link">permission denied reading /var/log/caddy/access.log</a><a href="#docker-sock" class="toc-link">Cannot connect to the Docker daemon / docker.sock: permission denied</a><a href="#k8s" class="toc-link">k8s:// — no such pod / cannot list resource</a><a href="#journalctl" class="toc-link">journalctl:// — No journal files</a><a href="#geoip" class="toc-link">GeoIP — country/asn empty or download fails</a><a href="#iptables" class="toc-link">guard — iptables: permission denied / No chain/target</a><a href="#self-ip" class="toc-link">guard — server IP protection / new bans suspended</a><a href="#blocklist" class="toc-link">blocklist refresh slow / fails</a><a href="#no-output" class="toc-link">No output / empty report</a><a href="#still-stuck" class="toc-link">Still stuck?</a></nav>
 </div>
 <script src="../docs.min.js?v=36"></script>
 </body>

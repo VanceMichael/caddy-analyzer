@@ -69,6 +69,8 @@
 <div class="callout callout-info"><div class="callout-label">Root richiesta?</div>Nessun flag richiede root da solo. I <strong>sottocomandi</strong> <code>guard</code>, <code>block</code>, <code>unban</code> richiedono <code>sudo</code> perché modificano le regole del firewall — consulta le loro pagine per <span class="pill pill-danger">modifica il firewall</span> rispetto a <span class="pill pill-readonly">sola lettura</span>.</div>
 
 <h2 id="subcommands">Sottocomandi</h2>
+<h3 id="guard-self-ip">Flag IP del server specifico di guard</h3>
+<p><code>guard --protect-self</code> è <code>true</code> per default. Protegge gli IP rilevati delle interfacce e di uscita pubblica, inclusi quelli dinamici. Usa <code>--protect-self=false</code> per saltare il rilevamento quando HTTPS diretto non è disponibile. È un flag specifico di guard, non un filtro globale; consulta <a href="../subcommands-guard.html#self-protection">guard</a> per errori e rimozione dei ban protetti.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Comando</th><th>Ambito</th><th>Descrizione</th></tr></thead>
 <tbody>
