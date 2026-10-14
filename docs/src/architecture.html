@@ -44,6 +44,10 @@
 <h2 id="memory">Memory bounds</h2>
 <p><code>MaxCardinality 100k</code> per counter, IPs LRU 100k, histogram 1000 buckets (log10, 1µs–10s), GeoIP LRU 50k. No unbounded maps.</p>
 
+<h2 id="self-ip">Guard self-IP flow</h2>
+<p><code>cmd/guard.go</code> calls <code>guard.DetectSelfIPs(ctx)</code> before constructing guard, unless <code>--protect-self=false</code>. Interface addresses and direct HTTPS egress discovery seed <code>Config.SelfIPs</code>; <code>Config.SelfIPLookup</code> enables refresh every 30 seconds in <code>Run</code> and before new bans in the shared <code>block</code> path.</p>
+<p>Self-IP matching also rejects subnet candidates containing an own address. State recovery never recreates a protected ban; cleanup removes tracked rules/state and retries failed removals. Lookup failure preserves the previous address set but prevents new bans. Discovery is synchronous and bounded; it never derives trusted server addresses from access logs or forwarded headers.</p>
+
 <h2 id="config-flow">Config flow</h2>
 <p><code>caddy-analyzer.json</code> (local → global) → <code>PersistentPreRunE applyTuning()</code> → CLI flag overrides. Guard adds <code>whitelist</code> + <code>--never-block</code> union. See <a href="guide/configuration.html">Configuration</a>.</p>
 

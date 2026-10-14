@@ -3,6 +3,24 @@
 <p>Tutte le modifiche rilevanti a <code>caddy-analyzer</code> saranno documentate in questo file.</p>
 <p>Il formato si basa su <a href="https://keepachangelog.com/en/1.0.0/">Keep a Changelog</a> e questo progetto aderisce al <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>.</p>
 
+<h2 id="0-8-0">0.8.0 — 2026-10-13</h2>
+<h3>Aggiunto</h3>
+<ul>
+<li><strong>Protezione automatica dall'auto-ban in guard</strong>: rileva per default gli IP delle interfacce e di uscita pubblica, li aggiorna ogni 30 secondi e prima dei nuovi ban e protegge gli indirizzi dinamici da soglie, pattern, feed, regole geografiche e subnet che li contengono. <code>--protect-self=false</code> disabilita il rilevamento.</li>
+</ul>
+<h3>Modificato</h3>
+<ul>
+<li><strong>Requisiti di rete di guard</strong>: rilevamento HTTPS diretto e specifico per famiglia tramite ipify, con icanhazip come alternativa. Un errore all'avvio impedisce a guard di partire; durante l'esecuzione sospende i nuovi ban e indica di riavviare con <code>--protect-self=false</code>. Le whitelist esplicite restano disponibili.</li>
+<li><strong>Indicazioni per l'aggiornamento di guard</strong>: il rilevamento ignora il proxy HTTP, verifica ogni famiglia richiesta e aggiunge latenza sincrona prima dei ban (4 secondi per richiesta, 10 complessivi). I servizi nelle reti limitate possono aggiungere <code>--protect-self=false</code> agli argomenti di avvio; gli IP amministratore remoti richiedono ancora voci whitelist separate.</li>
+<li><strong>Documentazione del rilascio</strong>: aggiornate le pagine inglesi e italiane di guard, CLI, configurazione, risoluzione problemi, FAQ, architettura e API, con esempi per amministratori remoti e reti limitate.</li>
+</ul>
+<h3>Corretto</h3>
+<ul>
+<li><strong>Ban salvati su IP protetti</strong>: non ricrea i ban sugli IP del server o autorizzati; rimuove regole firewall e stato corrispondenti, riprovando le rimozioni fallite.</li>
+<li><strong>Scadenze obsolete</strong>: le scadenze lasciate dopo la pulizia non rimuovono ban più recenti e non producono eventi di sblocco duplicati.</li>
+<li><strong>Segnalazione dei ban immediati</strong>: blocklist e regole geografiche segnalano un ban solo quando il blocco è stato applicato o simulato con successo.</li>
+</ul>
+
 <h2 id="0-7-5">0.7.5 — 2026-10-10</h2>
 <h3>Modificato</h3>
 <ul>

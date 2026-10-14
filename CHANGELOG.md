@@ -5,6 +5,21 @@ All notable changes to `caddy-analyzer` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-13
+
+### Added
+- **Automatic guard self-ban protection**: discover server interface/public egress IPs by default, refresh every 30 seconds and before new bans, and protect dynamic addresses from thresholds, patterns, feeds, country rules, and covering subnet bans. `--protect-self=false` disables discovery; failed discovery suspends new bans.
+
+### Changed
+- **Guard network requirements**: self-IP discovery uses direct, family-specific HTTPS requests to ipify with icanhazip as fallback. Startup discovery failures stop guard; runtime failures suspend new bans and explain how to restart with `--protect-self=false`. Explicit never-block lists remain available when discovery is disabled.
+- **Guard upgrade guidance**: discovery ignores HTTP proxies, checks every required address family, and adds synchronous lookup latency before bans (4 seconds per request, 10 seconds overall). Restricted-network services can add `--protect-self=false` to their startup arguments; remote administrator addresses still need separate whitelist entries.
+- **Release documentation**: refresh English and Italian guard, CLI, configuration, troubleshooting, FAQ, architecture and API documentation, including remote-administrator and restricted-network examples.
+
+### Fixed
+- **Protected saved bans**: never recreate saved bans for protected server or allowlisted addresses; remove matching firewall rules and saved state, retrying failed removals.
+- **Stale ban expiries**: expiry entries left behind after protection cleanup cannot remove newer bans or emit duplicate unban events.
+- **Immediate-ban reporting**: blocklist and country rules report a ban only when the block was actually applied or simulated successfully.
+
 ## [0.7.5] - 2026-10-10
 
 ### Changed

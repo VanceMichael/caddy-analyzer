@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../it/index.html">Panoramica</a><span class="sep">/</span><span>Motore delle minacce</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Motore delle minacce</h1>
 <p>26 categorie, resistenza all'evasione a doppio passaggio, tag MITRE. Questa pagina offre una panoramica sincera: cosa viene rilevato, cosa no e dove leggere i dettagli.</p>
 
@@ -93,6 +93,10 @@
 </tbody>
 </table></div>
 <div class="callout callout-warning"><div class="callout-label">Non bloccarti fuori</div>Ogni esempio di <code>guard</code> che modifica il firewall e contrassegnato con <span class="pill pill-danger">modifica il firewall</span>. Su un host remoto, usa sempre <code>--never-block YOUR_IP</code>. In caso di dubbi, usa prima i comandi in sola lettura (<code>blocklist list</code>, <code>--detect -f html</code>).</div>
+
+<h2 id="self-protection">Protezione dall'auto-ban e falsi positivi</h2>
+<p>Il default di guard <code>--protect-self=true</code> esclude dai ban gli IP rilevati delle interfacce e di uscita pubblica del server, inclusi quelli dinamici e le subnet che li contengono. Non considera sicura ogni richiesta periodica e non autorizza automaticamente altri utenti. Le sorgenti dietro lo stesso NAT che arrivano con l'IP pubblico protetto condividono l'esenzione. Gli IP amministratore espliciti vanno ancora in <code>--never-block</code>/<code>whitelist</code>; Fail2Ban e i comandi manuali <code>block</code> sono separati.</p>
+<p>Il rilevamento richiede HTTPS diretto. Un errore impedisce l'avvio o sospende i nuovi ban, indicando <code>--protect-self=false</code>. Disabilitalo e usa whitelist esplicite nelle reti limitate. Consulta <a href="subcommands-guard.html#self-protection">guard</a> per aggiornamento, rimozione dei ban salvati e ambito.</p>
 
 <h2 id="what">Cosa fa</h2>
 <ul>
@@ -121,7 +125,7 @@ caddy-analyze tail docker://caddy --detect  # live, severity-colored</code></pre
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#limits" class="toc-link">Cosa NON fa: limiti e falsi positivi</a><a href="#what" class="toc-link">Cosa fa</a><a href="#where" class="toc-link">Dove proseguire</a><a href="#quick-check" class="toc-link">Verifica rapida</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#limits" class="toc-link">Cosa NON fa: limiti e falsi positivi</a><a href="#self-protection" class="toc-link">Protezione dall'auto-ban e falsi positivi</a><a href="#what" class="toc-link">Cosa fa</a><a href="#where" class="toc-link">Dove proseguire</a><a href="#quick-check" class="toc-link">Verifica rapida</a></nav>
 </div>
 <script src="../docs.min.js?v=36"></script>
 </body>

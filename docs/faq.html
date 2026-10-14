@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Overview</a><span class="sep">/</span><span>FAQ</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>FAQ</h1>
 <p>From GitHub issues, PR discussions and questions that came up while writing the docs. Fewer good questions beat a round number of filler.</p>
 
@@ -90,6 +90,10 @@
 
 <h2 id="guard-not-blocking">Guard is running but not blocking — why?</h2>
 <p>Common: Caddy runs in Docker and guard uses <code>iptables</code> (INPUT) while traffic hits <code>DOCKER-USER</code>. Use <code>--firewall-backend hybrid</code> or <code>auto</code> (detects Docker). Check <code>--detect-confidence 8</code> — low-confidence hits are not blocked. Check <code>--never-block</code> — your IP may be allowlisted. See <a href="subcommands-guard.html">guard</a> and <a href="guide/troubleshooting.html#iptables">Troubleshooting → iptables</a>.</p>
+
+<h2 id="self-ban">Can guard ban its own server after a router restart?</h2>
+<p>With the default <code>--protect-self=true</code>, guard discovers the server's interface/public egress IPs and verifies them again before applying a new ban, including subnet bans covering the address. A successful refresh replaces old IPs and removes tracked bans covering the new one. This protects same-public-IP traffic, not every legitimate user: other administrator connections and distinct IPv6 device addresses still need explicit whitelist entries.</p>
+<p>If discovery fails, the error explains how to restart with <code>--protect-self=false</code>. Startup stops; runtime suspends new bans until discovery recovers. The check needs direct outbound HTTPS and ignores proxy settings. See <a href="guide/troubleshooting.html#self-ip">server-IP discovery errors</a>.</p>
 
 <h2 id="docker-no-logs">Why does <code>docker://caddy</code> show no logs?</h2>
 <p>Two fixes from <a href="changelog.html">0.5.1</a>: Caddy writes access logs to stderr, and the reader now merges stdout+stderr. If still empty: check <code>docker ps | grep caddy</code> for the name, and <code>docker logs caddy --tail 5</code> for raw output. Also check <code>docker.sock</code> permissions (<code>sudo usermod -aG docker $USER</code>).</p>
@@ -112,7 +116,7 @@
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#watch-vs-follow" class="toc-link">What is the difference between --watch, --follow and tail?</a><a href="#ip-filter-zero" class="toc-link">Why does --ip 10.0.0.1 return 0 results when the log clearly has that IP?</a><a href="#country-zero" class="toc-link">Why does --country IT return 0?</a><a href="#guard-not-blocking" class="toc-link">Guard is running but not blocking — why?</a><a href="#docker-no-logs" class="toc-link">Why does docker://caddy show no logs?</a><a href="#detect-vs-guard" class="toc-link">Does --detect block IPs?</a><a href="#large-log-memory" class="toc-link">Will a 1M-line log OOM?</a><a href="#update-cosign" class="toc-link">Why does update require cosign?</a><a href="#country-block-fail" class="toc-link">Why does --country-block CN error on start?</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#watch-vs-follow" class="toc-link">What is the difference between --watch, --follow and tail?</a><a href="#ip-filter-zero" class="toc-link">Why does --ip 10.0.0.1 return 0 results when the log clearly has that IP?</a><a href="#country-zero" class="toc-link">Why does --country IT return 0?</a><a href="#guard-not-blocking" class="toc-link">Guard is running but not blocking — why?</a><a href="#self-ban" class="toc-link">Can guard ban its own server after a router restart?</a><a href="#docker-no-logs" class="toc-link">Why does docker://caddy show no logs?</a><a href="#detect-vs-guard" class="toc-link">Does --detect block IPs?</a><a href="#large-log-memory" class="toc-link">Will a 1M-line log OOM?</a><a href="#update-cosign" class="toc-link">Why does update require cosign?</a><a href="#country-block-fail" class="toc-link">Why does --country-block CN error on start?</a></nav>
 </div>
 <script src="docs.min.js?v=36"></script>
 </body>

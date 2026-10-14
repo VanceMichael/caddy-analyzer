@@ -37,6 +37,13 @@ func TestGuardDryRunFlag(t *testing.T) {
 	}
 }
 
+func TestGuardProtectSelfDefault(t *testing.T) {
+	flag := guardCmd.Flags().Lookup("protect-self")
+	if flag == nil || flag.DefValue != "true" {
+		t.Fatal("guard must protect server IPs by default")
+	}
+}
+
 // TestRunGuardRequiresRoot: when not running as root, guard must refuse to
 // start with a clear error so the user does not believe protection is
 // active while every BlockIP silently fails.

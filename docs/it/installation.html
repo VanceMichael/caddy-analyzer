@@ -75,11 +75,11 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../it/index.html">Panoramica</a><span class="sep">/</span><span>Installazione</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Installazione</h1>
 <p>Requisiti: <strong>Go 1.25+</strong> solo se compili dai sorgenti. Tutti gli altri metodi forniscono un binario statico (CGO_ENABLED=0) per Linux / macOS / Windows su amd64, arm64, arm. Verifica ogni metodo subito dopo l'installazione.</p>
 
-<div class="callout callout-info"><div class="callout-label">Verifica rapida (tutti i metodi)</div><code>caddy-analyze --version</code> dovrebbe stampare <code>v0.6.1</code> (o una versione successiva). Se vedi <code>command not found</code>, verifica PATH o riapri il terminale.</div>
+<div class="callout callout-info"><div class="callout-label">Verifica rapida (tutti i metodi)</div>Il binario della release v0.8.0 stampa <code>caddy-analyze version 0.8.0</code>; le build sorgenti possono mostrare <code>0.8.0-dev</code>. Se vedi <code>command not found</code>, verifica PATH o riapri il terminale.</div>
 
 <h2 id="linux-mac">Linux / macOS — install.sh</h2>
 <p>Rileva SO/architettura, scarica tar.gz + <code>checksums.txt</code>, verifica SHA256 e cosign facoltativo.</p>
@@ -87,7 +87,7 @@
 <h3 id="verify-linux">Verifica</h3>
 <pre><code>caddy-analyze --version
 which caddy-analyze
-# expected: /usr/local/bin/caddy-analyze  and  v0.6.1</code></pre>
+# atteso: /usr/local/bin/caddy-analyze  e  version 0.8.0</code></pre>
 <p>Se <code>/usr/local/bin</code> non è scrivibile, lo script usa <code>sudo mv</code>. L'installer installa attualmente in <code>/usr/local/bin</code>; usa l'archivio della release o <code>go install</code> se ti serve una posizione utente.</p>
 
 <h2 id="windows">Windows — install.ps1</h2>
@@ -120,12 +120,12 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/lenny-ts/ca
 docker images ghcr.io/lenny-ts/caddy-analyzer --format "{{.Tag}} {{.Size}}"</code></pre>
 
 <h2 id="binaries">Binari precompilati</h2>
-<p>Scarica da <a href="https://github.com/lenny-ts/caddy-analyzer/releases">GitHub Releases</a>. Ogni <code>*.tar.gz</code> (o <code>.zip</code> su Windows) contiene <code>caddy-analyze</code> + <code>checksums.txt</code> + cosign <code>.sig/.pem</code>.</p>
-<pre><code># example Linux amd64 — replace v0.6.1 with latest
-curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.6.1/caddy-analyzer_v0.6.1_linux_amd64.tar.gz -o /tmp/caddy.tgz
-curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.6.1/checksums.txt -o /tmp/checksums.txt
-grep caddy-analyzer_v0.6.1_linux_amd64.tar.gz /tmp/checksums.txt | (cd /tmp && sha256sum -c)
-tar -xzf /tmp/caddy.tgz -C /tmp && sudo mv /tmp/caddy-analyze /usr/local/bin/</code></pre>
+<p>Scarica da <a href="https://github.com/lenny-ts/caddy-analyzer/releases">GitHub Releases</a>. Ogni <code>*.tar.gz</code> (o <code>.zip</code> su Windows) contiene <code>caddy-analyze</code>. Scarica separatamente <code>checksums.txt</code> e firma/certificato/bundle Cosign dalla stessa release.</p>
+<pre><code># Linux amd64 — il tag ha v, la versione nell'archivio no
+curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.8.0/caddy-analyzer_0.8.0_linux_amd64.tar.gz -o /tmp/caddy-analyzer_0.8.0_linux_amd64.tar.gz
+curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.8.0/checksums.txt -o /tmp/checksums.txt
+grep caddy-analyzer_0.8.0_linux_amd64.tar.gz /tmp/checksums.txt | (cd /tmp && sha256sum -c)
+tar -xzf /tmp/caddy-analyzer_0.8.0_linux_amd64.tar.gz -C /tmp && sudo mv /tmp/caddy-analyze /usr/local/bin/</code></pre>
 <h3 id="verify-binaries">Verifica</h3>
 <pre><code>caddy-analyze --version
 ls -l /usr/local/bin/caddy-analyze
@@ -136,7 +136,8 @@ ls -l /usr/local/bin/caddy-analyze
 <pre><code>sudo tee /etc/systemd/system/caddy-guard.service >/dev/null &lt;&lt;'EOF'
 [Unit]
 Description=caddy-analyzer Security Guard Daemon
-After=network.target caddy.service
+Wants=network-online.target
+After=network-online.target caddy.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/caddy-analyze guard --limit 50 --window 1m /var/log/caddy/access.log
@@ -148,6 +149,7 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now caddy-guard</code></pre>
 <h3 id="verify-systemd">Verifica</h3>
+<p>La protezione IP predefinita richiede HTTPS diretto in uscita. Nelle reti limitate aggiungi <code>--protect-self=false</code> e gli indirizzi fidati <code>--never-block</code> a <code>ExecStart</code>, poi esegui <code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart caddy-guard</code>. Gli indirizzi amministratore remoti sono separati dagli IP del server protetti automaticamente.</p>
 <pre><code>systemctl status caddy-guard --no-pager
 journalctl -u caddy-guard -n 20 --no-pager
 # should show "guard started" and no "permission denied" on /var/log/caddy/access.log</code></pre>
@@ -155,7 +157,7 @@ journalctl -u caddy-guard -n 20 --no-pager
 <h2 id="update">Aggiornamento</h2>
 <pre><code>caddy-analyze update --check   # check without installing
 caddy-analyze update           # install latest (cosign + SHA256 verified)
-caddy-analyze update --version v0.6.1 --force  # pin / downgrade</code></pre>
+caddy-analyze update --version v0.8.0 --force  # fissa / reinstalla</code></pre>
 
 <h2 id="troubleshoot">Risoluzione dei problemi</h2>
 <ul>

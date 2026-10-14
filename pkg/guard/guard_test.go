@@ -451,9 +451,13 @@ func TestGuardExpiryLoopUnblocksExpiredIPs(t *testing.T) {
 
 	g.setBlocked("1.2.3.4")
 	fb.blocked["1.2.3.4"] = true
+	expiry := time.Now().Add(20 * time.Millisecond)
+	g.mu.Lock()
+	g.expiries["1.2.3.4"] = expiry
+	g.mu.Unlock()
 
 	select {
-	case g.expCh <- expiryEntry{ip: "1.2.3.4", when: time.Now().Add(20 * time.Millisecond)}:
+	case g.expCh <- expiryEntry{ip: "1.2.3.4", when: expiry}:
 	case <-time.After(time.Second):
 		t.Fatal("timed out sending to expCh")
 	}

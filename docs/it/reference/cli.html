@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../it/reference/cli.html">Riferimento</a><span class="sep">/</span><span>Riferimento CLI</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <div class="cli-heading"><div><div class="hero-badge">Interfaccia a riga di comando</div><h1>Riferimento CLI</h1></div></div>
 <p>Punto di ingresso: <code>caddy-analyze [flags] [source...]</code> — le sorgenti sono risolte tramite <a href="../sources.html">Sorgenti log</a> o <a href="../guide/configuration.html">caddy-analyzer.json</a>. Di seguito: ogni flag, il suo ambito e se interagisce con il sistema.</p>
 <div class="callout callout-info"><div class="callout-label">Guida operativa</div>Per spiegazioni passo passo, casi d'uso e flag propri di ogni sottocomando, consulta <a href="commands.html">Tutti i comandi</a>.</div>
@@ -146,6 +146,8 @@
 <div class="callout callout-info"><div class="callout-label">Root richiesta?</div>Nessun flag richiede root da solo. I <strong>sottocomandi</strong> <code>guard</code>, <code>block</code>, <code>unban</code> richiedono <code>sudo</code> perché modificano le regole del firewall — consulta le loro pagine per <span class="pill pill-danger">modifica il firewall</span> rispetto a <span class="pill pill-readonly">sola lettura</span>.</div>
 
 <h2 id="subcommands">Sottocomandi</h2>
+<h3 id="guard-self-ip">Flag IP del server specifico di guard</h3>
+<p><code>guard --protect-self</code> è <code>true</code> per default. Protegge gli IP rilevati delle interfacce e di uscita pubblica, inclusi quelli dinamici. Usa <code>--protect-self=false</code> per saltare il rilevamento quando HTTPS diretto non è disponibile. È un flag specifico di guard, non un filtro globale; consulta <a href="../subcommands-guard.html#self-protection">guard</a> per errori e rimozione dei ban protetti.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Comando</th><th>Ambito</th><th>Descrizione</th></tr></thead>
 <tbody>
@@ -170,7 +172,7 @@
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#global" class="toc-link">Flag globali — ambito e root</a><a href="#subcommands" class="toc-link">Sottocomandi</a><a href="#persistenti-tutti-i-sottocomandi" class="toc-link h3">Persistenti — tutti i sottocomandi</a><a href="#solo-root" class="toc-link h3">Solo root</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#global" class="toc-link">Flag globali — ambito e root</a><a href="#subcommands" class="toc-link">Sottocomandi</a><a href="#guard-self-ip" class="toc-link h3">Flag IP del server specifico di guard</a><a href="#persistenti-tutti-i-sottocomandi" class="toc-link h3">Persistenti — tutti i sottocomandi</a><a href="#solo-root" class="toc-link h3">Solo root</a></nav>
 </div>
 <script src="../../docs.min.js?v=36"></script>
 </body>

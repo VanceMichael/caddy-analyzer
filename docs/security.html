@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Overview</a><span class="sep">/</span><span>Threat Engine</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Threat Engine</h1>
 <p>26 categories, dual-pass evasion resistance, MITRE-tagged. This page is the honest overview — what is detected, what is not, and where to read the details.</p>
 
@@ -93,6 +93,10 @@
 </tbody>
 </table></div>
 <div class="callout callout-warning"><div class="callout-label">Do not lock yourself out</div>Every <code>guard</code> example that modifies firewall is marked <span class="pill pill-danger">modifies firewall</span>. On a remote host, always <code>--never-block YOUR_IP</code>. When in doubt, use read-only commands (<code>blocklist list</code>, <code>--detect -f html</code>) first.</div>
+
+<h2 id="self-protection">Self-ban protection and false positives</h2>
+<p>Guard's default <code>--protect-self=true</code> exempts discovered server interface/public egress IPs, including dynamic addresses and covering subnet bans. It does not classify every periodic request as safe or automatically trust other users. Shared-NAT sources arriving with the protected public address share the exemption. Explicit administrator IPs still belong in <code>--never-block</code>/<code>whitelist</code>; Fail2Ban and manual <code>block</code> commands are separate.</p>
+<p>Discovery needs direct HTTPS. Failure stops startup or suspends new bans, with an error explaining <code>--protect-self=false</code>. Disable it and use explicit whitelist entries for restricted networks. See <a href="subcommands-guard.html#self-protection">guard</a> for refresh, saved-ban cleanup and scope.</p>
 
 <h2 id="what">What it does</h2>
 <ul>
@@ -121,7 +125,7 @@ caddy-analyze tail docker://caddy --detect  # live, severity-colored</code></pre
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#limits" class="toc-link">What it does NOT do — limits and false positives</a><a href="#what" class="toc-link">What it does</a><a href="#where" class="toc-link">Where to go next</a><a href="#quick-check" class="toc-link">Quick check</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#limits" class="toc-link">What it does NOT do — limits and false positives</a><a href="#self-protection" class="toc-link">Self-ban protection and false positives</a><a href="#what" class="toc-link">What it does</a><a href="#where" class="toc-link">Where to go next</a><a href="#quick-check" class="toc-link">Quick check</a></nav>
 </div>
 <script src="docs.min.js?v=36"></script>
 </body>

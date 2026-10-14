@@ -14,6 +14,10 @@
 <h2 id="guard-not-blocking">Guard e in esecuzione ma non blocca: perche?</h2>
 <p>Causa comune: Caddy e in Docker e guard usa <code>iptables</code> (INPUT), mentre il traffico passa da <code>DOCKER-USER</code>. Usa <code>--firewall-backend hybrid</code> o <code>auto</code> (rileva Docker). Controlla <code>--detect-confidence 8</code>: gli hit a bassa confidenza non vengono bloccati. Controlla <code>--never-block</code>: il tuo IP potrebbe essere nella allowlist. Consulta <a href="subcommands-guard.html">guard</a> e <a href="guide/troubleshooting.html#iptables">Risoluzione dei problemi → iptables</a>.</p>
 
+<h2 id="self-ban">Guard può bannare il proprio server dopo il riavvio del router?</h2>
+<p>Con il default <code>--protect-self=true</code>, guard rileva gli IP delle interfacce e di uscita pubblica e li verifica nuovamente prima di applicare un nuovo ban, comprese le subnet che contengono l'indirizzo. Un aggiornamento riuscito sostituisce gli IP precedenti e rimuove i ban tracciati che coprono quello nuovo. Protegge il traffico con lo stesso IP pubblico, non ogni utente legittimo: altre connessioni amministratore e gli IPv6 distinti dei dispositivi richiedono voci whitelist esplicite.</p>
+<p>Se il rilevamento fallisce, l'errore indica di riavviare con <code>--protect-self=false</code>. L'avvio si interrompe; durante l'esecuzione i nuovi ban vengono sospesi fino al recupero. Il controllo richiede HTTPS diretto in uscita e ignora il proxy. Consulta <a href="guide/troubleshooting.html#self-ip">errori di rilevamento IP del server</a>.</p>
+
 <h2 id="docker-no-logs">Perche <code>docker://caddy</code> non mostra log?</h2>
 <p>Due correzioni dalla <a href="changelog.html">0.5.1</a>: Caddy scrive gli access log su stderr e il reader ora unisce stdout+stderr. Se e ancora vuoto: controlla il nome con <code>docker ps | grep caddy</code> e l'output grezzo con <code>docker logs caddy --tail 5</code>. Controlla anche i permessi di <code>docker.sock</code> (<code>sudo usermod -aG docker $USER</code>).</p>
 

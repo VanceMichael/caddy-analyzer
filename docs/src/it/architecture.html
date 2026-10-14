@@ -44,6 +44,10 @@
 <h2 id="memory">Limiti di memoria</h2>
 <p><code>MaxCardinality 100k</code> per contatore, LRU IP da 100k, istogramma da 1000 bucket (log10, 1µs–10s), LRU GeoIP da 50k. Nessuna mappa senza limiti.</p>
 
+<h2 id="self-ip">Flusso degli IP del server in guard</h2>
+<p><code>cmd/guard.go</code> chiama <code>guard.DetectSelfIPs(ctx)</code> prima di costruire guard, salvo <code>--protect-self=false</code>. Gli IP delle interfacce e il rilevamento HTTPS diretto inizializzano <code>Config.SelfIPs</code>; <code>Config.SelfIPLookup</code> abilita l'aggiornamento ogni 30 secondi in <code>Run</code> e prima dei nuovi ban nel percorso condiviso <code>block</code>.</p>
+<p>Il confronto esclude anche le subnet candidate che contengono un IP proprio. Il recupero dello stato non ricrea ban protetti; la pulizia rimuove regole/stato tracciati e riprova le rimozioni fallite. Un errore di rilevamento conserva gli indirizzi precedenti ma impedisce nuovi ban. Il rilevamento è sincrono e limitato da timeout; non ricava mai IP fidati dai log di accesso o dagli header inoltrati.</p>
+
 <h2 id="config-flow">Flusso di configurazione</h2>
 <p><code>caddy-analyzer.json</code> (locale → globale) → <code>PersistentPreRunE applyTuning()</code> → override dei flag CLI. Guard aggiunge l'unione di <code>whitelist</code> + <code>--never-block</code>. Consulta <a href="guide/configuration.html">Configurazione</a>.</p>
 

@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../reference/cli.html">Reference</a><span class="sep">/</span><span>API</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>API / Packages</h1>
 <p>Import path: <code>github.com/lenny-ts/caddy-analyzer/pkg/*</code>. Go 1.25+. For the data flow across these packages, see <a href="../architecture.html">Architecture</a>.</p>
 
@@ -135,18 +135,26 @@ sources := mgr.ListSources() // name, URL, count, age, status</code></pre>
 <pre><code>import "github.com/lenny-ts/caddy-analyzer/pkg/guard"
 import "github.com/lenny-ts/caddy-analyzer/pkg/guard/firewall"
 
-backend, _ := firewall.Detect(guard.LevelInfo) // auto → hybrid/docker/iptables/nftables
+ctx := context.Background()
+selfIPs, err := guard.DetectSelfIPs(ctx)
+if err != nil { log.Fatal(err) }
+backend := firewall.Detect(firewall.BackendAuto)
 g := guard.New(guard.Config{
-  Limit: 100, Window: time.Minute, Duration: 10*time.Minute,
-  Blocker: backend, GeoIP: geo, BlocklistMgr: mgr,
+  Limit: 100, Window: time.Minute, BlockDuration: 10*time.Minute,
+  FirewallBackend: backend, GeoIP: geo, BlocklistMgr: mgr,
+  StatePath: "/var/lib/caddy-analyzer/blocked.json",
   NeverBlock: []string{"10.0.0.0/8"},
-  OnAudit: func(a guard.AuditEntry){ /* log */ },
+  SelfIPs: selfIPs, SelfIPLookup: guard.DetectSelfIPs,
+  OnError: func(err error) { log.Print(err) },
+  OnAudit: func(action, ip, reason, duration string) {
+    log.Printf("%s %s %s %s", action, ip, reason, duration)
+  },
 })
-// per log line:
-if g.Evaluate(entry) == guard.BlockNow { /* iptables BLOCK */ }
-// periodic:
-blocked := g.Tick() // expires, subnet/cred-stuffing/rps checks
+// linesCh is a &lt;-chan string of raw Caddy JSON log lines.
+g.Run(ctx, linesCh, log.Printf) // detection, ticks, expiry and 30s self-IP refresh
+g.FlushState()
 </code></pre>
+<p>Also import <code>context</code>, <code>log</code> and <code>time</code>. Unlike the CLI default, library callers opt into self-IP protection by seeding <code>SelfIPs</code> before <code>New</code> restores state and setting <code>SelfIPLookup</code>. Leave both unset for explicit-whitelist-only operation. <code>Evaluate(line string)</code> returns no value; <code>Tick(ctx)</code> returns blocked candidates when driving the loop manually.</p>
 <p>State persists to <code>/var/lib/caddy-analyzer/blocked.json</code>. See <a href="../architecture.html#data-flow">Architecture → data flow</a> for where guard sits.</p>
 
 <h2 id="reader">reader — multi-source ingestion</h2>

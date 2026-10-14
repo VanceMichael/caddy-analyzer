@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../guide/configuration.html">Guide</a><span class="sep">/</span><span>Configuration</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Configuration</h1>
 <p>How the tool itself is configured. For how to <em>connect</em> to each log source, see <a href="../sources.html">Log Sources</a>.</p>
 
@@ -116,6 +116,10 @@ caddy-analyze config reset --global     # remove global
 caddy-analyze blocklist init            # persist blocklist flags to config
 caddy-analyze whitelist --init          # persist never-block to /etc/caddy-analyzer/whitelist.txt</code></pre>
 <p><code>blocklist init</code> writes current <code>--no-default-blocklists / --blocklist-config / --blocklist-remove</code> into the same file so <code>guard</code> picks them up without CLI flags.</p>
+
+<h2 id="self-ip">Guard server-IP protection</h2>
+<p><code>--protect-self=true</code> is a guard-only CLI flag, not a field in <code>caddy-analyzer.json</code>. Discovered interface/public egress addresses are kept in memory and refreshed automatically; they are not written to the whitelist file. Explicit <code>--never-block</code> entries and the whitelist are still loaded at startup, so file edits require restarting guard.</p>
+<p>For an offline, proxy-only or fixed-IP deployment, put <code>--protect-self=false</code> in the guard service's startup arguments. This disables automatic server-IP discovery without disabling explicit never-block entries. Direct public discovery ignores <code>http_proxy</code>/<code>https_proxy</code>. See <a href="../subcommands-guard.html#self-protection">guard</a> and <a href="troubleshooting.html#self-ip">discovery errors</a>.</p>
 
 <h2 id="tuning">Tuning — precedence</h2>
 <p>Config file values are defaults; CLI flags override when explicitly set. The three tunables:</p>
@@ -166,7 +170,7 @@ caddy-analyze --geo-cache-ttl 48h --geo-cache-size 100000 /var/log/caddy/access.
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#config-file" class="toc-link">Config file — where it lives</a><a href="#schema" class="toc-link">Schema</a><a href="#manage" class="toc-link">Manage it</a><a href="#tuning" class="toc-link">Tuning — precedence</a><a href="#env" class="toc-link">Environment &amp;amp; XDG</a><a href="#caches" class="toc-link">Caches &amp;amp; state (not config)</a><a href="#precedence" class="toc-link">Resolution order (no source arg)</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#config-file" class="toc-link">Config file — where it lives</a><a href="#schema" class="toc-link">Schema</a><a href="#manage" class="toc-link">Manage it</a><a href="#self-ip" class="toc-link">Guard server-IP protection</a><a href="#tuning" class="toc-link">Tuning — precedence</a><a href="#env" class="toc-link">Environment &amp;amp; XDG</a><a href="#caches" class="toc-link">Caches &amp;amp; state (not config)</a><a href="#precedence" class="toc-link">Resolution order (no source arg)</a></nav>
 </div>
 <script src="../docs.min.js?v=36"></script>
 </body>

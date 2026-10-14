@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../guide/configuration.html">Guide</a><span class="sep">/</span><span>Examples</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Examples</h1>
 <p>Real tasks, copy-paste. Replace <code>testdata/sample.log</code> with your source — <a href="../sources.html">Log Sources</a>.</p>
 
@@ -112,6 +112,16 @@ caddy-analyze tail docker://caddy --detect</code></pre>
 caddy-analyze --max-latency 100ms --min-size 500kb testdata/sample.log
 caddy-analyze top path --slow 1s testdata/sample.log</code></pre>
 
+<h2 id="self-ban">Guard on a home server or remote VPS</h2>
+<pre><code># Preview with automatic server-IP protection (enabled by default)
+caddy-analyze guard /var/log/caddy/access.log --dry-run
+# Enforce: modifies firewall; shared home-router public IP is protected
+sudo caddy-analyze guard /var/log/caddy/access.log
+# Remote VPS/restricted network: skip discovery and protect the administrator explicitly
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Replace the example address with the trusted client/server IP. Automatic protection covers discovered server addresses, not every legitimate client. Discovery errors explain how to disable it; see <a href="../subcommands-guard.html#self-protection">guard</a>.</p>
+
 <h2 id="ops">Operational logs</h2>
 <pre><code>caddy-analyze --ops-only --level error,warn testdata/sample.log
 caddy-analyze --watch journalctl://caddy.service  # 9th tab = Operational</code></pre>
@@ -122,7 +132,7 @@ caddy-analyze --watch journalctl://caddy.service  # 9th tab = Operational</code>
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#debug-5xx" class="toc-link">Debug 5xx after a deploy</a><a href="#hunt-bots" class="toc-link">Hunt bots &amp;amp; scanners</a><a href="#geo" class="toc-link">Geo — where is traffic from</a><a href="#forensics" class="toc-link">Forensics with --detect</a><a href="#perf" class="toc-link">Slow endpoints</a><a href="#ops" class="toc-link">Operational logs</a></nav>
+  <nav class="doc-toc" aria-label="On this page"><div class="toc-label">On this page</div><a href="#debug-5xx" class="toc-link">Debug 5xx after a deploy</a><a href="#hunt-bots" class="toc-link">Hunt bots &amp;amp; scanners</a><a href="#geo" class="toc-link">Geo — where is traffic from</a><a href="#forensics" class="toc-link">Forensics with --detect</a><a href="#perf" class="toc-link">Slow endpoints</a><a href="#self-ban" class="toc-link">Guard on a home server or remote VPS</a><a href="#ops" class="toc-link">Operational logs</a></nav>
 </div>
 <script src="../docs.min.js?v=36"></script>
 </body>

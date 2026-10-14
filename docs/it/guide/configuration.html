@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../it/guide/configuration.html">Guida</a><span class="sep">/</span><span>Configurazione</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · aggiornata <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · aggiornata <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>Configurazione</h1>
 <p>Come viene configurato lo strumento stesso. Per sapere come <em>connetterti</em> a ogni sorgente di log, consulta <a href="../sources.html">Sorgenti log</a>.</p>
 
@@ -116,6 +116,10 @@ caddy-analyze config reset --global     # remove global
 caddy-analyze blocklist init            # persist blocklist flags to config
 caddy-analyze whitelist --init          # persist never-block to /etc/caddy-analyzer/whitelist.txt</code></pre>
 <p><code>blocklist init</code> scrive gli attuali valori di <code>--no-default-blocklists / --blocklist-config / --blocklist-remove</code> nello stesso file, così <code>guard</code> li applica senza flag CLI.</p>
+
+<h2 id="self-ip">Protezione degli IP del server in guard</h2>
+<p><code>--protect-self=true</code> è un flag CLI specifico di guard, non un campo di <code>caddy-analyzer.json</code>. Gli indirizzi rilevati delle interfacce e di uscita pubblica restano in memoria e vengono aggiornati automaticamente, senza scriverli nel file whitelist. Le voci <code>--never-block</code> e la whitelist esplicita sono caricate all'avvio: le modifiche al file richiedono il riavvio di guard.</p>
+<p>Per un server offline, accessibile solo tramite proxy o con IP fisso, aggiungi <code>--protect-self=false</code> agli argomenti di avvio del servizio guard. Disabilita il rilevamento automatico senza disattivare le voci never-block esplicite. Il rilevamento pubblico diretto ignora <code>http_proxy</code>/<code>https_proxy</code>. Consulta <a href="../subcommands-guard.html#self-protection">guard</a> e <a href="troubleshooting.html#self-ip">errori di rilevamento</a>.</p>
 
 <h2 id="tuning">Ottimizzazione — precedenza</h2>
 <p>I valori del file di configurazione sono predefiniti; i flag CLI li sostituiscono quando impostati esplicitamente. Le tre opzioni:</p>
@@ -166,7 +170,7 @@ caddy-analyze --geo-cache-ttl 48h --geo-cache-size 100000 /var/log/caddy/access.
 
     </div>
   </main>
-  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#config-file" class="toc-link">File di configurazione — dove si trova</a><a href="#schema" class="toc-link">Schema</a><a href="#manage" class="toc-link">Gestiscilo</a><a href="#tuning" class="toc-link">Ottimizzazione — precedenza</a><a href="#env" class="toc-link">Ambiente e XDG</a><a href="#caches" class="toc-link">Cache e stato (non configurazione)</a><a href="#precedence" class="toc-link">Ordine di risoluzione (nessun argomento sorgente)</a></nav>
+  <nav class="doc-toc" aria-label="In questa pagina"><div class="toc-label">In questa pagina</div><a href="#config-file" class="toc-link">File di configurazione — dove si trova</a><a href="#schema" class="toc-link">Schema</a><a href="#manage" class="toc-link">Gestiscilo</a><a href="#self-ip" class="toc-link">Protezione degli IP del server in guard</a><a href="#tuning" class="toc-link">Ottimizzazione — precedenza</a><a href="#env" class="toc-link">Ambiente e XDG</a><a href="#caches" class="toc-link">Cache e stato (non configurazione)</a><a href="#precedence" class="toc-link">Ordine di risoluzione (nessun argomento sorgente)</a></nav>
 </div>
 <script src="../../docs.min.js?v=36"></script>
 </body>

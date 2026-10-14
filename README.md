@@ -65,6 +65,23 @@ Output example:
 
 > **Guard mode** (`caddy-analyze guard`) extends detection with automatic firewall blocking — blocks offending IPs via `iptables`, Docker `DOCKER-USER` chain, or `nftables` depending on the environment. **Auto-detection** selects the right backend: when Docker containers with Caddy are found, rules are applied to both `INPUT` and `DOCKER-USER` chains so traffic is blocked regardless of network path. Uses a **sliding window** (per-IP, per-second buckets) so attackers cannot evade limits by straddling a tick boundary. Supports audit logging (`--audit-log`), state persistence across restarts (`--state-file`), an IP allowlist (`--never-block` / `--never-block-file` or `whitelist` command), distributed-scan defense (`--subnet-limit`), RPS anomaly alerting (`--rps-anomaly`), and `--trust-forwarded` for deployments behind a reverse proxy/CDN. Pattern-detection blocks are filtered by confidence via `--detect-confidence` (default 8, `0` disables). **Blocklist feeds** (Spamhaus DROP, FireHOL, CINS, Tor, Emerging Threats, AbuseIPDB) trigger immediate blocks via a CIDR trie; `--country-block CN,RU,IR` blocks by GeoIP country code.
 
+### Automatic self-ban protection
+
+Guard protects its server's interface and public egress IPs by default (`--protect-self=true`). This covers requests from the same home router/NAT even when its public IP changes. Addresses are discovered at startup, refreshed every 30 seconds, and checked again **before every new ban**. Thresholds, pattern detection, feeds, country rules, and subnet bans cannot block a discovered server address. Existing tracked bans covering it are removed from the firewall and saved state; old addresses stop being exempt after a successful refresh.
+
+Public IPv4/IPv6 discovery uses direct HTTPS requests to ipify, with icanhazip as a fallback, for address families present on the server. Discovery ignores HTTP proxy settings and never derives trusted addresses from request headers or access logs. If discovery fails at startup, guard refuses to start; later failures suspend new bans until discovery recovers. Existing bans for other addresses remain in place. `--dry-run` simulates protection and cleanup without changing the firewall or state.
+
+Each discovery request has a 4-second timeout, with a 10-second overall limit. A failure in any required address family, including configured IPv6 without working Internet connectivity, fails the entire discovery. Before-ban lookups are synchronous, so discovery adds latency to ban decisions. For restricted-network or fixed-IP deployments, disable these checks explicitly:
+
+```bash
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10
+```
+
+Replace `203.0.113.10` with the trusted server or administrator IP. On a remote VPS, the administrator's home/mobile IP is usually different from the server's IP and must be allowlisted separately. With shared NAT, every client arriving from the protected public IP receives the same exemption. Server addresses are kept in memory, not added to the whitelist file; file changes still require restarting guard.
+
+Discovery errors at startup and during operation include the instruction to restart with `--protect-self=false` to disable server IP checks. Offline installations can disable discovery with this flag and supply an explicit `--never-block` list. Protection applies to this guard, not Fail2Ban or explicit manual `block` commands. Clients using another public connection, or another device's distinct IPv6 address, still need their own whitelist entry. With multiple WAN routes, run guard on the same egress path as the processes you want to protect.
+
 ---
 
 ## Quick Start
@@ -232,7 +249,7 @@ Once installed, self-update with signature verification (cosign keyless + SHA256
 ```bash
 caddy-analyze update                     # install the latest verified release
 caddy-analyze update --check             # report availability only
-caddy-analyze update --version v0.7.5    # pin an exact release
+caddy-analyze update --version v0.8.0    # pin an exact release
 sudo caddy-analyze update                # when the binary is in a root-owned path
 ```
 
@@ -363,6 +380,7 @@ returned as a command error.
 | `--state-file` | | `/var/lib/caddy-analyzer/blocked.json` | Persist blocked-IP state across restarts (guard/block/unban). Empty to disable |
 | `--never-block` | | `""` | Comma-separated IPs/CIDRs that should never be blocked (guard) |
 | `--never-block-file` | | `""` | File with IPs/CIDRs (one per line, `#` comments) to never block (guard) |
+| `--protect-self` | | `true` | Automatically protect the server's interface and public egress IPs, including dynamic addresses (guard) |
 | `--detect-confidence` | | `8` | Min confidence (1-10) for pattern-detection blocking (guard). `0` disables |
 | `--subnet-limit` | | `0` | Block a /24 when its combined requests exceed this (guard). `0` disables; distributed-scan defense |
 | `--rps-anomaly` | | `0` | Alert when current RPS exceeds this factor over the EWMA baseline (guard). `0` disables; e.g. `5` = 5× spike |

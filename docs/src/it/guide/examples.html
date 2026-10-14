@@ -35,6 +35,16 @@ caddy-analyze tail docker://caddy --detect</code></pre>
 caddy-analyze --max-latency 100ms --min-size 500kb testdata/sample.log
 caddy-analyze top path --slow 1s testdata/sample.log</code></pre>
 
+<h2 id="self-ban">Guard su server casalingo o VPS remota</h2>
+<pre><code># Anteprima con protezione IP del server attiva per default
+caddy-analyze guard /var/log/caddy/access.log --dry-run
+# Blocco reale: modifica il firewall; l'IP pubblico del router condiviso è protetto
+sudo caddy-analyze guard /var/log/caddy/access.log
+# VPS/rete limitata: salta il rilevamento e autorizza l'amministratore esplicitamente
+sudo caddy-analyze guard /var/log/caddy/access.log \
+  --protect-self=false --never-block 203.0.113.10</code></pre>
+<p>Sostituisci l'indirizzo di esempio con l'IP fidato del client/server. La protezione automatica copre gli indirizzi rilevati del server, non tutti i client legittimi. Gli errori indicano come disabilitarla; consulta <a href="../subcommands-guard.html#self-protection">guard</a>.</p>
+
 <h2 id="ops">Log operativi</h2>
 <pre><code>caddy-analyze --ops-only --level error,warn testdata/sample.log
 caddy-analyze --watch journalctl://caddy.service  # 9a scheda = Operativo</code></pre>

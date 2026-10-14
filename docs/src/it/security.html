@@ -17,6 +17,10 @@
 </table></div>
 <div class="callout callout-warning"><div class="callout-label">Non bloccarti fuori</div>Ogni esempio di <code>guard</code> che modifica il firewall e contrassegnato con <span class="pill pill-danger">modifica il firewall</span>. Su un host remoto, usa sempre <code>--never-block YOUR_IP</code>. In caso di dubbi, usa prima i comandi in sola lettura (<code>blocklist list</code>, <code>--detect -f html</code>).</div>
 
+<h2 id="self-protection">Protezione dall'auto-ban e falsi positivi</h2>
+<p>Il default di guard <code>--protect-self=true</code> esclude dai ban gli IP rilevati delle interfacce e di uscita pubblica del server, inclusi quelli dinamici e le subnet che li contengono. Non considera sicura ogni richiesta periodica e non autorizza automaticamente altri utenti. Le sorgenti dietro lo stesso NAT che arrivano con l'IP pubblico protetto condividono l'esenzione. Gli IP amministratore espliciti vanno ancora in <code>--never-block</code>/<code>whitelist</code>; Fail2Ban e i comandi manuali <code>block</code> sono separati.</p>
+<p>Il rilevamento richiede HTTPS diretto. Un errore impedisce l'avvio o sospende i nuovi ban, indicando <code>--protect-self=false</code>. Disabilitalo e usa whitelist esplicite nelle reti limitate. Consulta <a href="subcommands-guard.html#self-protection">guard</a> per aggiornamento, rimozione dei ban salvati e ambito.</p>
+
 <h2 id="what">Cosa fa</h2>
 <ul>
   <li><strong>Motore a doppio passaggio</strong> — ogni URI viene controllato sia grezzo sia dopo URL-unescape (split <code>?</code> + <code>PathUnescape</code>/<code>QueryUnescape</code> + fallback manuale <code>%</code>) per rilevare bypass <code>%2e%2e</code> e doppia codifica. Guard esegue lo stesso <code>Detector</code> per finestra.</li>

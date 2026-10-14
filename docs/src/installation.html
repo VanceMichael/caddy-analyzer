@@ -2,7 +2,7 @@
 <h1>Installation</h1>
 <p>Requirements: <strong>Go 1.25+</strong> only if building from source. All other methods ship a static binary (CGO_ENABLED=0) for Linux / macOS / Windows on amd64, arm64, arm. Verify each method right after install.</p>
 
-<div class="callout callout-info"><div class="callout-label">Quick verify (all methods)</div><code>caddy-analyze --version</code> should print <code>v0.6.1</code> (or newer). If you see <code>command not found</code>, check PATH or re-open the terminal.</div>
+<div class="callout callout-info"><div class="callout-label">Quick verify (all methods)</div>The v0.8.0 release binary prints <code>caddy-analyze version 0.8.0</code>; source builds may show <code>0.8.0-dev</code>. If you see <code>command not found</code>, check PATH or re-open the terminal.</div>
 
 <h2 id="linux-mac">Linux / macOS — install.sh</h2>
 <p>Detects OS/arch, downloads tar.gz + <code>checksums.txt</code>, verifies SHA256 and optional cosign.</p>
@@ -10,7 +10,7 @@
 <h3 id="verify-linux">Verify</h3>
 <pre><code>caddy-analyze --version
 which caddy-analyze
-# expected: /usr/local/bin/caddy-analyze  and  v0.6.1</code></pre>
+# expected: /usr/local/bin/caddy-analyze  and  version 0.8.0</code></pre>
 <p>If <code>/usr/local/bin</code> is not writable, the script uses <code>sudo mv</code>. The installer currently installs to <code>/usr/local/bin</code>; use the release archive or <code>go install</code> when you need a user-local location.</p>
 
 <h2 id="windows">Windows — install.ps1</h2>
@@ -43,12 +43,12 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/lenny-ts/ca
 docker images ghcr.io/lenny-ts/caddy-analyzer --format "{{.Tag}} {{.Size}}"</code></pre>
 
 <h2 id="binaries">Pre-built binaries</h2>
-<p>Download from <a href="https://github.com/lenny-ts/caddy-analyzer/releases">GitHub Releases</a>. Each <code>*.tar.gz</code> (or <code>.zip</code> on Windows) contains <code>caddy-analyze</code> + <code>checksums.txt</code> + cosign <code>.sig/.pem</code>.</p>
-<pre><code># example Linux amd64 — replace v0.6.1 with latest
-curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.6.1/caddy-analyzer_v0.6.1_linux_amd64.tar.gz -o /tmp/caddy.tgz
-curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.6.1/checksums.txt -o /tmp/checksums.txt
-grep caddy-analyzer_v0.6.1_linux_amd64.tar.gz /tmp/checksums.txt | (cd /tmp && sha256sum -c)
-tar -xzf /tmp/caddy.tgz -C /tmp && sudo mv /tmp/caddy-analyze /usr/local/bin/</code></pre>
+<p>Download from <a href="https://github.com/lenny-ts/caddy-analyzer/releases">GitHub Releases</a>. Each <code>*.tar.gz</code> (or <code>.zip</code> on Windows) contains <code>caddy-analyze</code>. Download <code>checksums.txt</code> and Cosign signature/certificate/bundle assets separately from the same release.</p>
+<pre><code># Linux amd64 — the tag has v, the archive version does not
+curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.8.0/caddy-analyzer_0.8.0_linux_amd64.tar.gz -o /tmp/caddy-analyzer_0.8.0_linux_amd64.tar.gz
+curl -sSfL https://github.com/lenny-ts/caddy-analyzer/releases/download/v0.8.0/checksums.txt -o /tmp/checksums.txt
+grep caddy-analyzer_0.8.0_linux_amd64.tar.gz /tmp/checksums.txt | (cd /tmp && sha256sum -c)
+tar -xzf /tmp/caddy-analyzer_0.8.0_linux_amd64.tar.gz -C /tmp && sudo mv /tmp/caddy-analyze /usr/local/bin/</code></pre>
 <h3 id="verify-binaries">Verify</h3>
 <pre><code>caddy-analyze --version
 ls -l /usr/local/bin/caddy-analyze
@@ -59,7 +59,8 @@ ls -l /usr/local/bin/caddy-analyze
 <pre><code>sudo tee /etc/systemd/system/caddy-guard.service >/dev/null &lt;&lt;'EOF'
 [Unit]
 Description=caddy-analyzer Security Guard Daemon
-After=network.target caddy.service
+Wants=network-online.target
+After=network-online.target caddy.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/caddy-analyze guard --limit 50 --window 1m /var/log/caddy/access.log
@@ -71,6 +72,7 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now caddy-guard</code></pre>
 <h3 id="verify-systemd">Verify</h3>
+<p>Default self-IP protection requires direct outbound HTTPS. For restricted-network servers, add <code>--protect-self=false</code> and explicit trusted <code>--never-block</code> addresses to <code>ExecStart</code>, then run <code>sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart caddy-guard</code>. Remote administrator addresses are separate from the server's automatically protected IPs.</p>
 <pre><code>systemctl status caddy-guard --no-pager
 journalctl -u caddy-guard -n 20 --no-pager
 # should show "guard started" and no "permission denied" on /var/log/caddy/access.log</code></pre>
@@ -78,7 +80,7 @@ journalctl -u caddy-guard -n 20 --no-pager
 <h2 id="update">Update</h2>
 <pre><code>caddy-analyze update --check   # check without installing
 caddy-analyze update           # install latest (cosign + SHA256 verified)
-caddy-analyze update --version v0.6.1 --force  # pin / downgrade</code></pre>
+caddy-analyze update --version v0.8.0 --force  # pin / reinstall</code></pre>
 
 <h2 id="troubleshoot">Troubleshooting</h2>
 <ul>

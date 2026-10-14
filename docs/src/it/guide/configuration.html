@@ -40,6 +40,10 @@ caddy-analyze blocklist init            # persist blocklist flags to config
 caddy-analyze whitelist --init          # persist never-block to /etc/caddy-analyzer/whitelist.txt</code></pre>
 <p><code>blocklist init</code> scrive gli attuali valori di <code>--no-default-blocklists / --blocklist-config / --blocklist-remove</code> nello stesso file, così <code>guard</code> li applica senza flag CLI.</p>
 
+<h2 id="self-ip">Protezione degli IP del server in guard</h2>
+<p><code>--protect-self=true</code> è un flag CLI specifico di guard, non un campo di <code>caddy-analyzer.json</code>. Gli indirizzi rilevati delle interfacce e di uscita pubblica restano in memoria e vengono aggiornati automaticamente, senza scriverli nel file whitelist. Le voci <code>--never-block</code> e la whitelist esplicita sono caricate all'avvio: le modifiche al file richiedono il riavvio di guard.</p>
+<p>Per un server offline, accessibile solo tramite proxy o con IP fisso, aggiungi <code>--protect-self=false</code> agli argomenti di avvio del servizio guard. Disabilita il rilevamento automatico senza disattivare le voci never-block esplicite. Il rilevamento pubblico diretto ignora <code>http_proxy</code>/<code>https_proxy</code>. Consulta <a href="../subcommands-guard.html#self-protection">guard</a> e <a href="troubleshooting.html#self-ip">errori di rilevamento</a>.</p>
+
 <h2 id="tuning">Ottimizzazione — precedenza</h2>
 <p>I valori del file di configurazione sono predefiniti; i flag CLI li sostituiscono quando impostati esplicitamente. Le tre opzioni:</p>
 <div class="table-wrap"><table>

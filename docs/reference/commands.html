@@ -75,7 +75,7 @@
   <main class="wrap" id="main">
     <div class="doc-content">
       <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../reference/cli.html">Reference</a><span class="sep">/</span><span>All commands</span></nav>
-      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.7.5</a> · updated <time datetime="2026-10-10">2026-10-10</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
+      <div class="page-meta"><a href="https://github.com/lenny-ts/caddy-analyzer/releases">v0.8.0</a> · updated <time datetime="2026-10-13">2026-10-13</time> · <a href="https://github.com/lenny-ts/caddy-analyzer">GitHub</a></div>
       <h1>All commands</h1>
 <p>This page explains what every command does, what it reads or changes, and which mode to choose. Use <code>caddy-analyze &lt;command&gt; --help</code> for the exact flags installed in your binary. The complete flag section separates persistent flags, root-only modes and command-specific options.</p>
 
@@ -143,6 +143,7 @@ caddy-analyze --against baseline.json access.log --threshold 15</code></pre>
 <h2 id="guard">guard</h2>
 <pre><code>sudo caddy-analyze guard [source] [flags]</code></pre>
 <p>Continuously monitors a source and automatically blocks IPs that cross request, authentication, not-found or detection thresholds. Depending on <code>--firewall-backend</code>, it can modify iptables, nftables, Docker's <code>DOCKER-USER</code> chain, or a hybrid of them. Blocks can be persisted in the state file and every action can be audited.</p>
+<p><code>--protect-self=true</code> discovers and protects server interface/public egress IPs at startup, every 30 seconds and before new bans. It also removes tracked bans covering these addresses. Discovery failure stops startup or suspends new bans during operation; errors instruct you to restart with <code>--protect-self=false</code> to skip these checks. Explicit whitelists still apply. See <a href="../subcommands-guard.html#self-protection">automatic self-ban protection</a> for network requirements and remote-administrator scope.</p>
 <div class="callout callout-danger"><div class="callout-label">Firewall safety</div>Protect the administrator IP with <code>--never-block</code> or <code>--never-block-file</code> before running on a remote host. Use <code>--dry-run</code> first. Normal mode needs root; dry-run does not change firewall or state.</div>
 <pre><code>sudo caddy-analyze guard /var/log/caddy/access.log --dry-run
 sudo caddy-analyze guard docker://caddy --never-block 203.0.113.10 \
@@ -190,7 +191,7 @@ caddy-analyze export-sigma - | sigma check</code></pre>
 <p>Checks for and installs a verified release from GitHub. Installation is fail-closed: cosign must validate the signed release manifest and the archive checksum must match it. <code>--check</code> performs no installation, <code>--version</code> pins a tag, <code>--force</code> permits reinstall or downgrade, and <code>--install-dir</code> selects a directory. If verification fails, the current binary is left untouched.</p>
 <pre><code>caddy-analyze update --check
 sudo caddy-analyze update
-caddy-analyze update --version v0.7.0 --install-dir ~/.local/bin</code></pre>
+caddy-analyze update --version v0.8.0 --install-dir ~/.local/bin</code></pre>
 
 <h2 id="completion">completion and version</h2>
 <pre><code>caddy-analyze --version
@@ -296,6 +297,7 @@ sudo caddy-analyze guard access.log --never-block-file whitelist.txt</code></pre
 <tr><td><code>--cache-dir</code></td><td>user cache</td><td>Blocklist cache directory.</td></tr>
 <tr><td><code>--never-block</code></td><td>none</td><td>Protected IPs/CIDRs; repeatable.</td></tr>
 <tr><td><code>--never-block-file</code></td><td>none</td><td>One IP/CIDR per line, with <code>#</code> comments.</td></tr>
+<tr><td><code>--protect-self</code></td><td>true</td><td>Automatically protect server interface/public egress IPs. Set <code>--protect-self=false</code> to disable discovery and its ban checks.</td></tr>
 <tr><td><code>--state-file</code></td><td><code>/var/lib/caddy-analyzer/blocked.json</code></td><td>Persists and recovers blocks; empty disables.</td></tr>
 <tr><td><code>--iptables-timeout</code></td><td>10s</td><td>Timeout for each firewall invocation.</td></tr>
 <tr><td><code>--subnet-limit</code></td><td>0</td><td>Blocks a /24 or /64 when distributed requests exceed the threshold.</td></tr>
