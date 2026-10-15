@@ -132,11 +132,46 @@ func BlockIP(ip string) error {
 	return runCmd(context.Background(), bin, append([]string{"-A"}, args...)...)
 }
 
+// isBadRuleError reports whether err is iptables' exit-1 "no matching
+// rule found" / "bad rule" response to -D. That condition means the desired
+// state (rule absent) already holds and is therefore success for unban.
+func isBadRuleError(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bad rule") ||
+		strings.Contains(msg, "does a matching rule") ||
+		strings.Contains(msg, "no chain/target/match")
+}
+
 // UnblockIP removes only the tagged DROP rule created by BlockIP.
+// Idempotent: if the rule (or the dedicated chain) does not exist the
+// desired state already holds and nil is returned.
 func UnblockIP(ip string) error {
 	bin := BinForIP(ip)
-	return runCmd(context.Background(), bin, "-D", chainName, "-s", ip,
+	err := runCmd(context.Background(), bin, "-D", chainName, "-s", ip,
 		"-m", "comment", "--comment", commentMarker, "-j", "DROP")
+	if err != nil && isBadRuleError(err) {
+		return nil
+	}
+	return err
+}
+
+// ruleExists reports whether the tagged DROP rule for ip is currently
+// installed.
+func ruleExists(ip string) (bool, error) {
+	bin := BinForIP(ip)
+	args := []string{chainName, "-s", ip, "-m", "comment", "--comment", commentMarker, "-j", "DROP"}
+	err := runCmd(context.Background(), bin, append([]string{"-C"}, args...)...)
+	if err == nil {
+		return true, nil
+	}
+	if isBadRuleError(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // ListBlockedIPs reports the IPs currently blocked by this tool.
@@ -280,12 +315,13 @@ type Guard struct {
 	tickReqs       atomic.Int64
 	ewmaRPS        float64
 	ewmaInit       bool
-	// saveState debounce: avoid O(n²) I/O under mass blocks by batching
-	// saves to at most one per second.
-	dirty    atomic.Bool
-	lastSave time.Time
-	saveMu   sync.Mutex
-	saveGen  atomic.Int64
+	// State persistence. Every block/unblock decision and every tick flush
+	// runs as a cross-process serialized transaction (saveMu in-process,
+	// flock across processes) that three-way merges synced (the last
+	// observed on-disk view), the file's current contents (manual
+	// block/unban commits from other processes) and the in-memory intent.
+	saveMu sync.Mutex
+	synced map[string]time.Time
 	// Blocklist and GeoIP for immediate block-on-match.
 	blocklistMgr *blocklist.Manager
 	countryBlock map[string]bool
@@ -499,7 +535,13 @@ func (sc *slidingCounters) ips() []string {
 }
 
 func New(cfg Config) *Guard {
-	sf := newStateFile(cfg.StatePath)
+	// A nil stateFile disables persistence entirely (no merge against an
+	// always-empty "disk", no lock traffic); stateFile with an empty path
+	// must not be used as a merge participant.
+	var sf *stateFile
+	if cfg.StatePath != "" {
+		sf = newStateFile(cfg.StatePath)
+	}
 	blocker := cfg.Blocker
 	if cfg.FirewallBackend != nil {
 		blocker = cfg.FirewallBackend
@@ -522,6 +564,7 @@ func New(cfg Config) *Guard {
 		cfg:            cfg,
 		expCh:          make(chan expiryEntry, 50000),
 		state:          sf,
+		synced:         make(map[string]time.Time),
 		expiries:       make(map[string]time.Time),
 		allowlist:      parseCIDRList(cfg.NeverBlock),
 		detectCounts:   make(map[string]int),
@@ -637,24 +680,57 @@ func cidrSubset(a, b *net.IPNet) bool {
 	return aOnes >= bOnes
 }
 
+// auditEvent is a deferred audit emission collected during a state
+// transaction and dispatched only after the file commit succeeds.
+type auditEvent struct {
+	action, ip, reason, dur string
+}
+
 func (g *Guard) loadState() {
 	if g.state == nil {
 		return
 	}
-	entries, err := g.state.load()
+	// Recovery runs inside the cross-process lock and restores firewall
+	// rules there, so a manual unban can never interleave as
+	// "unban commits → guard recreates the rule from a stale snapshot".
+	err := g.state.withLock(func() error {
+		entries, err := g.state.loadLocked()
+		if err != nil {
+			return err
+		}
+		g.ingestLoadedEntries(entries)
+		// The raw on-disk view is the three-way merge baseline, even for
+		// entries this startup drops (expired/protected): the first flush
+		// then propagates those deletions as guard decisions.
+		g.mu.Lock()
+		g.synced = entriesToMap(entries)
+		g.mu.Unlock()
+		return nil
+	})
 	if err != nil && g.cfg.OnError != nil {
 		g.cfg.OnError(fmt.Errorf("load state %s: %w", g.state.path, err))
 	}
+	// Server/allowlist protection cleanup retries failed removals.
+	g.clearProtectedBlocks()
+}
+
+// ingestLoadedEntries rebuilds in-memory state and firewall rules from the
+// on-disk entries read under the state lock.
+func (g *Guard) ingestLoadedEntries(entries []stateEntry) {
 	now := time.Now()
 	for _, e := range entries {
 		switch {
 		case g.isAllowlisted(e.IP):
 			// Keep failed removals tracked for retry; never recreate this ban.
+			g.mu.Lock()
 			g.blocked[e.IP] = true
 			g.expiries[e.IP] = e.When
+			g.mu.Unlock()
 		case e.When.IsZero():
 			// Permanent block: always restore, regardless of current duration.
+			g.mu.Lock()
 			g.blocked[e.IP] = true
+			g.mu.Unlock()
 			// Recreate the firewall rule — iptables rules may have been
 			// flushed while we were down (reboot, iptables -F, etc.).
 			if !g.cfg.DryRun {
@@ -666,7 +742,9 @@ func (g *Guard) loadState() {
 			// Temporary blocks recorded under a previous run: running in
 			// permanent mode now; preserve them as permanent to avoid
 			// silently dropping firewall protection while we were down.
+			g.mu.Lock()
 			g.blocked[e.IP] = true
+			g.mu.Unlock()
 			if !g.cfg.DryRun {
 				if err := g.blocker.Block(e.IP); err != nil && g.cfg.OnError != nil {
 					g.cfg.OnError(fmt.Errorf("restore block %s: %w", e.IP, err))
@@ -687,68 +765,487 @@ func (g *Guard) loadState() {
 				g.cfg.OnAudit(action, e.IP, "expired during downtime", g.cfg.BlockDuration.String())
 			}
 		default:
+			g.mu.Lock()
 			g.blocked[e.IP] = true
+			g.mu.Unlock()
 			// Recreate the firewall rule for still-valid temporary blocks.
 			if !g.cfg.DryRun {
 				if err := g.blocker.Block(e.IP); err != nil && g.cfg.OnError != nil {
 					g.cfg.OnError(fmt.Errorf("restore block %s: %w", e.IP, err))
 				}
 			}
+			g.mu.Lock()
 			g.expiries[e.IP] = e.When
 			g.initial = append(g.initial, expiryEntry{ip: e.IP, when: e.When})
+			g.mu.Unlock()
 		}
 	}
-	g.clearProtectedBlocks()
 }
 
-// saveStateDebounced marks the state dirty and flushes at most once per
-// second to avoid O(n²) I/O when many IPs are blocked in a single tick.
-func (g *Guard) saveStateDebounced() {
-	g.saveMu.Lock()
-	g.dirty.Store(true)
-	g.saveGen.Add(1)
-	g.saveMu.Unlock()
-	g.mu.Lock()
-	shouldFlush := time.Since(g.lastSave) > time.Second
-	g.mu.Unlock()
-	if shouldFlush {
-		g.saveState()
-	}
+// stateTxn is the workspace of one serialized convergence transaction.
+type stateTxn struct {
+	disk      map[string]time.Time // current file contents
+	mem       map[string]time.Time // in-memory intent at tx start
+	base      map[string]time.Time // last committed view the guard observed
+	merged    map[string]time.Time // converged result to durably commit
+	adoptAdds map[string]time.Time // entries to adopt into memory
+	adoptChg  map[string]time.Time // in-memory entries updated externally
+	adoptDels []string             // in-memory entries deleted externally
+	newExpiry []expiryEntry        // adopted/created temporary bans
+	audits    []auditEvent         // audits emitted only after commit
 }
 
-func (g *Guard) saveState() {
-	if g.state == nil || g.cfg.DryRun {
-		return
+// stateTx serializes all state transactions in this process (saveMu) and
+// across processes (flock). Every firewall+state decision MUST take this
+// lock around both the firewall mutation and the durable replacement so
+// that both stores observe the same total order.
+func (g *Guard) stateTx(tx func() error) error {
+	if g.state == nil {
+		return tx()
 	}
 	g.saveMu.Lock()
 	defer g.saveMu.Unlock()
-	g.mu.Lock()
-	entries := make([]stateEntry, 0, len(g.expiries))
-	for ip, when := range g.expiries {
-		entries = append(entries, stateEntry{IP: ip, When: when})
+	return g.state.withLock(tx)
+}
+
+// beginTxn loads disk, memory and the merge baseline. Callers must hold
+// the state transaction lock.
+func (g *Guard) beginTxn() (*stateTxn, error) {
+	diskEntries, err := g.state.loadLocked()
+	if err != nil {
+		return nil, err
 	}
-	permanent := make([]stateEntry, 0)
+	t := &stateTxn{
+		disk:      entriesToMap(diskEntries),
+		adoptAdds: make(map[string]time.Time),
+		adoptChg:  make(map[string]time.Time),
+	}
+	g.mu.Lock()
+	t.mem = make(map[string]time.Time, len(g.blocked))
 	for ip := range g.blocked {
-		if _, hasExp := g.expiries[ip]; !hasExp {
-			permanent = append(permanent, stateEntry{IP: ip, When: time.Time{}})
+		if w, ok := g.expiries[ip]; ok {
+			t.mem[ip] = w
+		} else {
+			t.mem[ip] = time.Time{}
 		}
 	}
-	entries = append(entries, permanent...)
-	g.lastSave = time.Now()
+	t.base = make(map[string]time.Time, len(g.synced))
+	for k, v := range g.synced {
+		t.base[k] = v
+	}
 	g.mu.Unlock()
-	genBefore := g.saveGen.Load()
-	if err := g.state.saveEntries(entries); err != nil {
-		g.dirty.Store(true)
+	return t, nil
+}
+
+// propose sets the merged view from the proposed intent mem2.
+func (t *stateTxn) propose(mem2 map[string]time.Time) {
+	t.merged = mergeBlockState(t.base, t.disk, mem2)
+}
+
+// reconcileExternal applies protection and expiry policy to entries the
+// merged view contains but the guard does not track at tx start (manual
+// block commits from other processes, including stale temporary bans).
+// Firewall calls happen inside the state transaction; the merged map is
+// mutated.
+func (g *Guard) reconcileExternal(t *stateTxn) {
+	now := time.Now()
+	for ip, when := range t.merged {
+		if _, ok := t.mem[ip]; ok {
+			continue
+		}
+		if g.isAllowlisted(ip) {
+			// Protection policy wins over external/manual blocks.
+			// Keep the entry tracked only while removals keep failing.
+			if err := g.blocker.Unblock(ip); err != nil {
+				if g.cfg.OnError != nil {
+					g.cfg.OnError(fmt.Errorf("unblock protected IP %s: %w", ip, err))
+				}
+				t.adoptAdds[ip] = when
+				continue
+			}
+			delete(t.merged, ip)
+			t.audits = append(t.audits, auditEvent{"unblock", ip, "never-block/server IP protection", ""})
+			continue
+		}
+		if !when.IsZero() && when.Before(now) {
+			// External temporary ban already expired: drop the rule.
+			// On failure leave the file entry in place; it remains an
+			// external add and a later transaction retries the removal.
+			if err := g.blocker.Unblock(ip); err != nil {
+				if g.cfg.OnError != nil {
+					g.cfg.OnError(fmt.Errorf("unblock expired %s: %w", ip, err))
+				}
+				continue
+			}
+			delete(t.merged, ip)
+			t.audits = append(t.audits, auditEvent{"unblock", ip, "expired during downtime", g.cfg.BlockDuration.String()})
+			continue
+		}
+		t.adoptAdds[ip] = when
+		if !when.IsZero() {
+			t.newExpiry = append(t.newExpiry, expiryEntry{ip: ip, when: when})
+		}
+	}
+}
+
+// planDiffs records how memory must change to match the merged view once
+// the file commit succeeds. mem2 is the intent this transaction proposes;
+// keys absent from the starting snapshot are this decision's own blocks.
+func (g *Guard) planDiffs(t *stateTxn, mem2 map[string]time.Time) {
+	for ip := range t.mem {
+		w, ok := t.merged[ip]
+		switch {
+		case !ok:
+			t.adoptDels = append(t.adoptDels, ip)
+		case !w.Equal(t.mem[ip]):
+			t.adoptChg[ip] = w
+		}
+	}
+	for ip := range mem2 {
+		if _, existed := t.mem[ip]; existed {
+			continue
+		}
+		if w, ok := t.merged[ip]; ok {
+			t.adoptAdds[ip] = w
+			if !w.IsZero() {
+				t.newExpiry = append(t.newExpiry, expiryEntry{ip: ip, when: w})
+			}
+		}
+	}
+}
+
+// commitLocked durably replaces the file with the merged view and, on
+// success only, adopts the view into memory and advances the baseline.
+// On any error memory and the baseline are untouched so a later
+// transaction retries with consistent inputs; no audit is delivered.
+func (g *Guard) commitLocked(t *stateTxn) error {
+	if !sameEntryMap(t.merged, t.disk) {
+		if err := g.state.writeLocked(mapToEntries(t.merged)); err != nil {
+			return err
+		}
+	}
+	g.mu.Lock()
+	for _, ip := range t.adoptDels {
+		delete(g.blocked, ip)
+		delete(g.expiries, ip)
+		g.removeSubnetLocked(ip)
+	}
+	for ip, when := range t.adoptAdds {
+		g.blocked[ip] = true
+		if when.IsZero() {
+			delete(g.expiries, ip)
+		} else {
+			g.expiries[ip] = when
+		}
+		g.addSubnetIfCIDRLocked(ip)
+	}
+	for ip, when := range t.adoptChg {
+		g.blocked[ip] = true
+		if when.IsZero() {
+			delete(g.expiries, ip)
+		} else {
+			g.expiries[ip] = when
+		}
+	}
+	g.synced = t.merged
+	g.mu.Unlock()
+
+	for _, e := range t.newExpiry {
+		select {
+		case g.expCh <- e:
+		default:
+			// A full channel only delays expiry until restart recovery.
+		}
+	}
+	for _, a := range t.audits {
+		if g.cfg.OnAudit != nil {
+			g.cfg.OnAudit(a.action, a.ip, a.reason, a.dur)
+		}
+	}
+	return nil
+}
+
+// errFirewallAction marks a firewall failure inside a removal transaction
+// so the caller can retry; the file is never updated in that case.
+var errFirewallAction = errors.New("firewall action failed")
+
+// unblockResult classifies a removal transaction outcome.
+type unblockResult int
+
+const (
+	unblockCommitted unblockResult = iota // rule removed, file and memory updated
+	unblockRetained                       // external permanent decision supersedes the removal
+	unblockFailed                         // firewall or commit error; caller retries
+)
+
+// commitBlockDecisions converges one or more block decisions: firewall
+// rules, in-memory blocked/expiry state and the durable file are committed
+// in one cross-process serialized transaction. Only returned candidates
+// fully converged and may be audited/reported.
+func (g *Guard) commitBlockDecisions(cs []Candidate, now time.Time) []Candidate {
+	if len(cs) == 0 {
+		return nil
+	}
+	if g.cfg.DryRun {
+		installed := make([]Candidate, 0, len(cs))
+		for _, c := range cs {
+			if g.isAllowlisted(c.IP) {
+				continue
+			}
+			g.setBlocked(c.IP)
+			g.mu.Lock()
+			g.addSubnetIfCIDRLocked(c.IP)
+			g.mu.Unlock()
+			if expiry := g.dryTrackExpiry(c.IP, now); !expiry.IsZero() {
+				select {
+				case g.expCh <- expiryEntry{ip: c.IP, when: expiry}:
+				default:
+				}
+			}
+			installed = append(installed, c)
+		}
+		return installed
+	}
+
+	var installed []Candidate
+	err := g.stateTx(func() error {
+		if g.state == nil {
+			// No persistence configured: converge firewall + memory only.
+			installed = g.applyBlockDecisionsNoState(cs, now)
+			return nil
+		}
+		t, err := g.beginTxn()
+		if err != nil {
+			return err
+		}
+		mem2 := make(map[string]time.Time, len(t.mem)+len(cs))
+		for k, v := range t.mem {
+			mem2[k] = v
+		}
+		expiry := time.Time{}
+		if g.cfg.BlockDuration > 0 {
+			expiry = now.Add(g.cfg.BlockDuration)
+		}
+		for _, c := range cs {
+			if _, dup := mem2[c.IP]; dup {
+				continue // already blocked: duplicate decision is idempotent
+			}
+			if g.isAllowlisted(c.IP) {
+				continue
+			}
+			if err := g.blocker.Block(c.IP); err != nil {
+				if g.cfg.OnError != nil {
+					g.cfg.OnError(fmt.Errorf("block %s: %w", c.IP, err))
+				}
+				continue
+			}
+			mem2[c.IP] = expiry
+			installed = append(installed, c)
+		}
+		t.propose(mem2)
+		g.reconcileExternal(t)
+		g.planDiffs(t, mem2)
+		return g.commitLocked(t)
+	})
+	if err != nil && g.cfg.OnError != nil {
+		g.cfg.OnError(fmt.Errorf("state transaction: %w", err))
+		return nil
+	}
+	return installed
+}
+
+// applyBlockDecisionsNoState installs decisions when persistence is
+// disabled (StatePath empty).
+func (g *Guard) applyBlockDecisionsNoState(cs []Candidate, now time.Time) []Candidate {
+	installed := make([]Candidate, 0, len(cs))
+	for _, c := range cs {
+		if g.IsBlocked(c.IP) || g.isAllowlisted(c.IP) {
+			continue
+		}
+		if err := g.blocker.Block(c.IP); err != nil {
+			if g.cfg.OnError != nil {
+				g.cfg.OnError(fmt.Errorf("block %s: %w", c.IP, err))
+			}
+			continue
+		}
+		g.setBlocked(c.IP)
+		g.mu.Lock()
+		g.addSubnetIfCIDRLocked(c.IP)
+		g.mu.Unlock()
+		if expiry := g.dryTrackExpiry(c.IP, now); !expiry.IsZero() {
+			select {
+			case g.expCh <- expiryEntry{ip: c.IP, when: expiry}:
+			default:
+			}
+		}
+		installed = append(installed, c)
+	}
+	return installed
+}
+
+// dryTrackExpiry records the expiry of a ban in memory (used by dry-run
+// and persistence-disabled paths). Returns the recorded expiry (zero for
+// permanent blocks).
+func (g *Guard) dryTrackExpiry(ip string, now time.Time) time.Time {
+	expiry := time.Time{}
+	if g.cfg.BlockDuration > 0 {
+		expiry = now.Add(g.cfg.BlockDuration)
+	}
+	if !expiry.IsZero() {
+		g.mu.Lock()
+		g.expiries[ip] = expiry
+		g.mu.Unlock()
+	}
+	return expiry
+}
+
+// commitUnblockDecision converges one removal decision (ban expiry or
+// protection cleanup). When forceProtection is set the entry is purged
+// even if an external permanent block supersedes — allowlist/self-IP
+// policy always wins. The firewall rule is deleted inside the same
+// transaction that updates the file, so a concurrent manual block cannot
+// be silently undone, and a failed removal leaves every store untouched
+// for retry.
+func (g *Guard) commitUnblockDecision(ip, reason string, forceProtection bool) unblockResult {
+	if g.cfg.DryRun {
+		g.removeBlocked(ip)
+		g.mu.Lock()
+		delete(g.expiries, ip)
+		g.mu.Unlock()
+		return unblockCommitted
+	}
+	result := unblockFailed
+	err := g.stateTx(func() error {
+		if g.state == nil {
+			if err := g.blocker.Unblock(ip); err != nil {
+				if g.cfg.OnError != nil {
+					g.cfg.OnError(fmt.Errorf("%s: unblock %s: %w", reason, ip, err))
+				}
+				return errFirewallAction
+			}
+			g.removeBlocked(ip)
+			g.mu.Lock()
+			delete(g.expiries, ip)
+			g.mu.Unlock()
+			result = unblockCommitted
+			return nil
+		}
+		t, err := g.beginTxn()
+		if err != nil {
+			return err
+		}
+		mem2 := make(map[string]time.Time, len(t.mem))
+		for k, v := range t.mem {
+			mem2[k] = v
+		}
+		delete(mem2, ip)
+		t.propose(mem2)
+		g.reconcileExternal(t)
+
+		if _, keep := t.merged[ip]; keep && !forceProtection {
+			// A newer external decision (typically a manual permanent
+			// block) supersedes this expiry: keep the rule and adopt the
+			// external value.
+			g.planDiffs(t, mem2)
+			if err := g.commitLocked(t); err != nil {
+				return err
+			}
+			result = unblockRetained
+			return nil
+		}
+		delete(t.merged, ip)
+		delete(t.adoptAdds, ip)
+		if err := g.blocker.Unblock(ip); err != nil {
+			if g.cfg.OnError != nil {
+				g.cfg.OnError(fmt.Errorf("%s: unblock %s: %w", reason, ip, err))
+			}
+			return errFirewallAction
+		}
+		g.planDiffs(t, mem2)
+		if err := g.commitLocked(t); err != nil {
+			return err
+		}
+		result = unblockCommitted
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errFirewallAction) {
+			return unblockFailed
+		}
 		if g.cfg.OnError != nil {
 			g.cfg.OnError(fmt.Errorf("save state: %w", err))
 		}
+		return unblockFailed
+	}
+	return result
+}
+
+// syncState converges the in-memory intent with the durable state file
+// without making a new firewall decision: it adopts manual block/unban
+// commits landed since the last transaction and persists pending guard
+// decisions. Called at every tick and on graceful shutdown, so an old
+// snapshot can never overwrite newer external commits. On any error the
+// next tick/shutdown retries.
+func (g *Guard) syncState() {
+	if g.state == nil || g.cfg.DryRun {
 		return
 	}
-	// Only clear dirty if no concurrent modification happened during
-	// the file write. If saveGen advanced, another block marked the
-	// state dirty since our snapshot — the next save will include it.
-	if genBefore == g.saveGen.Load() {
-		g.dirty.Store(false)
+	err := g.stateTx(func() error {
+		t, err := g.beginTxn()
+		if err != nil {
+			return err
+		}
+		mem2 := make(map[string]time.Time, len(t.mem))
+		for k, v := range t.mem {
+			mem2[k] = v
+		}
+		t.propose(mem2)
+		g.reconcileExternal(t)
+		g.planDiffs(t, mem2)
+		return g.commitLocked(t)
+	})
+	if err != nil && g.cfg.OnError != nil {
+		g.cfg.OnError(fmt.Errorf("save state: %w", err))
+	}
+}
+
+// sameEntryMap compares two ip -> expiry maps by semantic time equality.
+func sameEntryMap(a, b map[string]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !va.Equal(vb) {
+			return false
+		}
+	}
+	return true
+}
+
+// removeSubnetLocked drops ip from blockedSubnets when ip parses as CIDR.
+// Callers must hold g.mu.
+func (g *Guard) removeSubnetLocked(ip string) {
+	if _, ipnet, err := net.ParseCIDR(ip); err == nil {
+		for i, n := range g.blockedSubnets {
+			if n.String() == ipnet.String() {
+				g.blockedSubnets = append(g.blockedSubnets[:i], g.blockedSubnets[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// addSubnetIfCIDRLocked registers ip in blockedSubnets when it is a CIDR.
+// Callers must hold g.mu.
+func (g *Guard) addSubnetIfCIDRLocked(ip string) {
+	if _, ipnet, err := net.ParseCIDR(ip); err == nil {
+		for _, n := range g.blockedSubnets {
+			if n.String() == ipnet.String() {
+				return
+			}
+		}
+		g.blockedSubnets = append(g.blockedSubnets, ipnet)
 	}
 }
 
@@ -756,53 +1253,12 @@ func (g *Guard) SetBlocker(b Blocker) {
 	g.blocker = b
 }
 
-// FlushState forces an immediate save of all blocked IPs to the state file.
-// Called during graceful shutdown to ensure no data is lost.
+// FlushState forces an immediate convergence of all blocked IPs with the
+// state file. Called during graceful shutdown to ensure no decision is
+// lost and that manual edits made during the run are honored rather than
+// overwritten by a stale in-memory snapshot.
 func (g *Guard) FlushState() {
-	g.dirty.Store(true)
-	g.saveState()
-}
-
-// AddPermanentBlockToState records ip as a permanent block in the state
-// file at path. Used by the block command so manual blocks survive guard
-// restarts. Idempotent: if the IP is already tracked, it is a no-op.
-func AddPermanentBlockToState(path, ip string) error {
-	if path == "" {
-		return nil
-	}
-	sf := newStateFile(path)
-	entries, err := sf.load()
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IP == ip {
-			return nil
-		}
-	}
-	entries = append(entries, stateEntry{IP: ip, When: time.Time{}})
-	return sf.saveEntries(entries)
-}
-
-// RemoveBlockFromState removes ip from the state file at path. Used by the
-// unban command so manual unbans are reflected in the guard's persisted
-// state.
-func RemoveBlockFromState(path, ip string) error {
-	if path == "" {
-		return nil
-	}
-	sf := newStateFile(path)
-	entries, err := sf.load()
-	if err != nil {
-		return err
-	}
-	var out []stateEntry
-	for _, e := range entries {
-		if e.IP != ip {
-			out = append(out, e)
-		}
-	}
-	return sf.saveEntries(out)
+	g.syncState()
 }
 
 func (g *Guard) IsBlocked(ip string) bool {
@@ -835,14 +1291,7 @@ func (g *Guard) removeBlocked(ip string) {
 	delete(g.blocked, ip)
 	// If ip is a CIDR (subnet block), also remove it from blockedSubnets so
 	// IsBlocked stops matching individual hosts inside that subnet.
-	if _, ipnet, err := net.ParseCIDR(ip); err == nil {
-		for i, n := range g.blockedSubnets {
-			if n.String() == ipnet.String() {
-				g.blockedSubnets = append(g.blockedSubnets[:i], g.blockedSubnets[i+1:]...)
-				break
-			}
-		}
-	}
+	g.removeSubnetLocked(ip)
 }
 
 func (g *Guard) Count() int {
@@ -1015,19 +1464,33 @@ func (g *Guard) Tick(ctx context.Context) []Candidate {
 		return candidates[i].Count > candidates[j].Count
 	})
 
-	var blocked []Candidate
-	for _, c := range candidates {
-		if g.isAllowlisted(c.IP) {
-			continue
-		}
-		if g.cfg.IPValidator != nil {
-			if err := g.cfg.IPValidator(c.IP); err != nil {
+	// Refresh self-IPs once per tick (the per-candidate path does the same
+	// for immediate block-on-match); a failed lookup suspends new bans.
+	valid := candidates
+	if !g.refreshSelfIPs(ctx) {
+		valid = nil
+	} else {
+		filtered := valid[:0]
+		for _, c := range candidates {
+			if g.isAllowlisted(c.IP) {
 				continue
 			}
+			if g.cfg.IPValidator != nil {
+				if err := g.cfg.IPValidator(c.IP); err != nil {
+					continue
+				}
+			}
+			filtered = append(filtered, c)
 		}
-		if g.block(ctx, c, now) {
-			blocked = append(blocked, c)
-		}
+		valid = filtered
+	}
+
+	// All decisions of this tick commit in one serialized firewall+state
+	// transaction so concurrent manual commands cannot interleave.
+	blocked := g.commitBlockDecisions(valid, now)
+	for _, c := range blocked {
+		g.auditBlock(c)
+		g.sessionBlocks.Add(1)
 	}
 
 	g.mu.Lock()
@@ -1043,13 +1506,28 @@ func (g *Guard) Tick(ctx context.Context) []Candidate {
 
 	g.detectAnomaly()
 
-	// Flush any debounced state at the end of the tick so blocks from this
-	// tick are persisted even under low block volume.
-	if g.dirty.Load() {
-		g.saveState()
-	}
+	// Converge with the state file at every tick: adopt manual block/unban
+	// commits that landed since the last transaction so external edits are
+	// picked up within one window even under zero block volume.
+	g.syncState()
 
 	return blocked
+}
+
+// auditBlock emits the block audit event for a committed decision.
+func (g *Guard) auditBlock(c Candidate) {
+	if g.cfg.OnAudit == nil {
+		return
+	}
+	dur := g.cfg.BlockDuration.String()
+	if g.cfg.BlockDuration <= 0 {
+		dur = "permanent"
+	}
+	action := "block"
+	if g.cfg.DryRun {
+		action = "would_block"
+	}
+	g.cfg.OnAudit(action, c.IP, c.Why, dur)
 }
 
 // detectAnomaly tracks request rate with an EWMA and fires an audit alert when
@@ -1085,43 +1563,14 @@ func (g *Guard) block(ctx context.Context, c Candidate, now time.Time) bool {
 	if !g.refreshSelfIPs(ctx) || g.isAllowlisted(c.IP) {
 		return false
 	}
-	g.setBlocked(c.IP)
-	if !g.cfg.DryRun {
-		if err := g.blocker.Block(c.IP); err != nil {
-			g.removeBlocked(c.IP)
-			return false
-		}
+	// Firewall rule, in-memory state and the durable file commit as one
+	// serialized decision; audit only after that commit succeeds.
+	committed := g.commitBlockDecisions([]Candidate{c}, now)
+	if len(committed) == 0 {
+		return false
 	}
-	// Track subnet blocks so IsBlocked short-circuits individual hosts in a
-	// blocked /24 without re-evaluating them on every request.
-	if _, ipnet, err := net.ParseCIDR(c.IP); err == nil {
-		g.mu.Lock()
-		g.blockedSubnets = append(g.blockedSubnets, ipnet)
-		g.mu.Unlock()
-	}
-	if g.cfg.OnAudit != nil {
-		dur := g.cfg.BlockDuration.String()
-		if g.cfg.BlockDuration <= 0 {
-			dur = "permanent"
-		}
-		action := "block"
-		if g.cfg.DryRun {
-			action = "would_block"
-		}
-		g.cfg.OnAudit(action, c.IP, c.Why, dur)
-	}
+	g.auditBlock(c)
 	g.sessionBlocks.Add(1)
-	if g.cfg.BlockDuration > 0 {
-		expiry := now.Add(g.cfg.BlockDuration)
-		g.mu.Lock()
-		g.expiries[c.IP] = expiry
-		g.mu.Unlock()
-		select {
-		case g.expCh <- expiryEntry{ip: c.IP, when: expiry}:
-		case <-ctx.Done():
-		}
-	}
-	g.saveStateDebounced()
 	return true
 }
 
@@ -1163,36 +1612,32 @@ func (g *Guard) runExpiryLoop(ctx context.Context) {
 				if !tracked || expiry.After(e.when) {
 					continue // Removed by self-IP protection or superseded by a new ban.
 				}
-				if !g.cfg.DryRun {
-					if err := g.blocker.Unblock(e.ip); err != nil {
-						if g.cfg.OnError != nil {
-							g.cfg.OnError(fmt.Errorf("unblock %s: %w", e.ip, err))
+				// Firewall removal and state update commit as one
+				// transaction; a concurrent manual block is either fully
+				// before (retained by the external-override rule) or fully
+				// after this expiry (it blocks again as the later decision).
+				switch g.commitUnblockDecision(e.ip, "block duration expired", false) {
+				case unblockFailed:
+					requeue = append(requeue, expiryEntry{ip: e.ip, when: now.Add(time.Minute)})
+				case unblockCommitted:
+					if g.cfg.OnAudit != nil {
+						action := "unblock"
+						if g.cfg.DryRun {
+							action = "would_unblock"
 						}
-						requeue = append(requeue, expiryEntry{ip: e.ip, when: now.Add(time.Minute)})
-						continue
+						g.cfg.OnAudit(action, e.ip, "block duration expired", g.cfg.BlockDuration.String())
 					}
-				}
-				g.removeBlocked(e.ip)
-				g.mu.Lock()
-				delete(g.expiries, e.ip)
-				g.mu.Unlock()
-				if g.cfg.OnAudit != nil {
-					action := "unblock"
-					if g.cfg.DryRun {
-						action = "would_unblock"
-					}
-					g.cfg.OnAudit(action, e.ip, "block duration expired", g.cfg.BlockDuration.String())
+				case unblockRetained:
+					// Superseded by a newer external block; nothing to do.
 				}
 			}
 			for _, e := range requeue {
 				heap.Push(&h, e)
 			}
-			g.saveStateDebounced()
 		case <-ctx.Done():
-			// Final flush so the on-disk state reflects the latest expiries.
-			if g.dirty.Load() {
-				g.saveState()
-			}
+			// Final convergence so the on-disk state reflects the latest
+			// expiries and any manual edits made while the guard ran.
+			g.syncState()
 			return
 		}
 	}

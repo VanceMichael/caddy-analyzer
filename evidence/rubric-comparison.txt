@@ -1,0 +1,9 @@
+项目：lenny-ts/caddy-analyzer｜题目：Guard 与手工命令状态收敛｜Session：6ad06ccc1c02c48400eb51cc
+关键验证：go test -count=1 ./... 全部通过；go test -count=10 -race ./pkg/guard ./cmd 全部通过；代码审计确认目录 Sync 错误被丢弃，启动恢复失败仅记录错误且内存仍标记 blocked。
+Rubric ID：1｜状态：通过｜期望行为：同一路径跨进程读改写完整串行，批量与重复操作不丢更新，文件完整且权限正确。｜实际观察：状态读改写持有稳定 sidecar 文件锁，临时文件写入、文件 Sync、0600 权限与原子 rename 在锁内执行，并发测试保持完整 JSON。｜直接证据：pkg/guard/state.go:31-164；pkg/guard/lock_unix.go；pkg/guard/converge_test.go；race 测试通过。
+Rubric ID：2｜状态：通过｜期望行为：Guard 保存和 FlushState 协调外部新增与删除，不用旧快照覆盖文件。｜实际观察：Guard 使用 synced、disk、mem 三方合并，tick 与退出均调用 syncState 并在同一跨进程事务中采用外部修改。｜直接证据：pkg/guard/converge.go:173-231；pkg/guard/guard.go:798-965、1185-1212、1469-1512。
+Rubric ID：3｜状态：通过｜期望行为：手工 block 状态提交失败时回滚规则，回滚失败时同时报告两项错误且不发布成功。｜实际观察：ManualBlock 在 state-write 失败后只移除本次新建规则，补偿错误写入 OpError，并且命令仅在函数返回 nil 后输出与审计成功。｜直接证据：pkg/guard/converge.go:66-128；cmd/block.go:38-70；pkg/guard/converge_test.go:230-280。
+Rubric ID：4｜状态：通过｜期望行为：手工 unban 的防火墙失败保留状态，状态失败恢复规则，批量继续且返回非零。｜实际观察：ManualUnban 在防火墙失败前不改文件，state-write 失败后重新 Block；unblockIPs 逐项继续并累计失败返回错误。｜直接证据：pkg/guard/converge.go:130-171；cmd/unban.go:88-119；pkg/guard/converge_test.go。
+Rubric ID：5｜状态：通过｜期望行为：终端和审计成功事件只在防火墙与持久状态一致后发布。｜实际观察：手工命令在收敛函数成功后才输出和审计；Guard 的 commitLocked 成功后才采用状态和发布延迟审计。｜直接证据：cmd/block.go:61-63；cmd/unban.go:105-109；pkg/guard/guard.go:916-965。
+Rubric ID：6｜状态：未通过｜期望行为：旧状态重启恢复有效规则，清理无效条目，并保留失败后的重试状态。｜实际观察：启动恢复永久或有效临时条目时先将 IP 写入 blocked，Blocker.Block 失败后只调用 OnError，后续 syncState 看到内存与磁盘一致，不再尝试建立防火墙规则。｜直接证据：pkg/guard/guard.go:729-779、1185-1212。｜原因：有效规则恢复失败没有进入可重试队列或未收敛状态。｜影响：Guard 内存报告 IP 已阻断，但防火墙规则缺失，进程持续运行期间不会自动恢复保护。｜证据位置：pkg/guard/guard.go:729-779。
+Rubric ID：7｜状态：未通过｜期望行为：锁定、写入、同步和重命名故障返回失败并保留旧状态，健康操作可继续。｜实际观察：文件 rename 后打开目录或 d.Sync 失败均被忽略，writeLocked 仍返回 nil。｜直接证据：pkg/guard/state.go:156-164。｜原因：目录打开和目录同步错误没有返回调用方。｜影响：命令会报告提交成功，但掉电后的目录项耐久性未得到确认，且调用方无法执行补偿。｜证据位置：pkg/guard/state.go:160-164。

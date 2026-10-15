@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,8 +15,16 @@ var unbanCmd = &cobra.Command{
 	Short: "Remove IP from firewall",
 	Long: `Remove one or more IPs from the firewall (iptables).
 
-Manual unbans are also reflected in the guard state file (if --state-file is
-set) so the guard does not re-block the IP on restart.
+Manual unbans are also reflected in the guard state file (if --state-file
+is set) so the guard does not re-block the IP on restart. For each IP the
+firewall removal and the persistent state update are committed as one
+cross-process serialized decision:
+  - firewall removal failure keeps the original state untouched;
+  - if the state commit fails after the rule was removed, protection is
+    restored (or an explicit failure with the compensation result is
+    returned);
+  - any non-converged IP makes the command exit non-zero.
+Removing an IP that is not blocked is a successful no-op (idempotent).
 
 Examples:
   caddy-analyze unban 192.168.1.1
@@ -71,30 +80,30 @@ func runUnban(cmd *cobra.Command, args []string) error {
 func unblockIPs(ips []string, al interface {
 	Log(string, string, string, string)
 }) error {
-	hadErr := false
+	failed := 0
 	for _, ip := range ips {
 		if err := validateIP(ip); err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
-			hadErr = true
+			failed++
 			continue
 		}
-		if err := guard.UnblockIP(ip); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
-			hadErr = true
+		if err := guard.ManualUnban(unbanStateFile, ip, systemBlocker); err != nil {
+			var opErr *guard.OpError
+			if errors.As(err, &opErr) && opErr.Unconverged {
+				fmt.Fprintf(os.Stderr, "  ✗ %s: NOT CONVERGED: %v\n", ip, err)
+			} else {
+				fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
+			}
+			failed++
 			continue
 		}
 		fmt.Printf("  ✓ %s unblocked\n", ip)
 		if al != nil {
 			al.Log("unblock", ip, "manual unban", "")
 		}
-		if unbanStateFile != "" {
-			if err := guard.RemoveBlockFromState(unbanStateFile, ip); err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ %s: state sync: %v\n", ip, err)
-			}
-		}
 	}
-	if hadErr {
-		return fmt.Errorf("one or more IPs failed to unblock")
+	if failed > 0 {
+		return fmt.Errorf("%d of %d IP(s) failed to converge", failed, len(ips))
 	}
 	return nil
 }

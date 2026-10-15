@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -13,13 +14,21 @@ var blockAuditLog string
 var blockStateFile string
 var blockNotify auditNotifyFlags
 
+// systemBlocker is the real firewall backend shared by the manual
+// block/unban commands.
+var systemBlocker guard.SystemBlocker
+
 var blockCmd = &cobra.Command{
 	Use:   "block <ip> [ip...]",
 	Short: "Block IP via iptables",
 	Long: `Block one or more IPs via iptables.
 
 Manual blocks are also written to the guard state file (if --state-file is
-set) so they survive guard restarts.
+set) so they survive guard restarts. For each IP the firewall rule and the
+persistent state are committed as one cross-process serialized decision:
+success (and the audit event) is reported only after both stores agree. If
+the state commit fails the new rule is rolled back; if rollback also fails
+the IP is reported as not converged and the command exits non-zero.
 
 Examples:
   caddy-analyze block 10.0.0.1
@@ -36,28 +45,30 @@ Examples:
 			return err
 		}
 		defer func() { _ = dispatcher.Close() }()
-		hadErr := false
+		failed := 0
 		for _, ip := range args {
 			if err := validateIP(ip); err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
-				hadErr = true
+				failed++
 				continue
 			}
-			if err := guard.BlockIP(ip); err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
-				hadErr = true
+			if err := guard.ManualBlock(blockStateFile, ip, systemBlocker); err != nil {
+				var opErr *guard.OpError
+				if errors.As(err, &opErr) && opErr.Unconverged {
+					fmt.Fprintf(os.Stderr, "  ✗ %s: NOT CONVERGED: %v\n", ip, err)
+				} else {
+					fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", ip, err)
+				}
+				failed++
 				continue
 			}
+			// Report and audit only after firewall rule and persistent
+			// state are both committed.
 			fmt.Printf("  ✓ %s blocked\n", ip)
 			dispatcher.Log("block", ip, "manual block", "permanent")
-			if blockStateFile != "" {
-				if err := guard.AddPermanentBlockToState(blockStateFile, ip); err != nil {
-					fmt.Fprintf(os.Stderr, "  ⚠ %s: state sync: %v\n", ip, err)
-				}
-			}
 		}
-		if hadErr {
-			return fmt.Errorf("one or more IPs failed to block")
+		if failed > 0 {
+			return fmt.Errorf("%d of %d IP(s) failed to converge", failed, len(args))
 		}
 		return nil
 	},

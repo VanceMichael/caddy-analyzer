@@ -152,7 +152,10 @@ func (g *Guard) refreshSelfIPs(ctx context.Context) bool {
 }
 
 // clearProtectedBlocks also removes subnet bans containing a server address.
-// Failed firewall removals remain in state so the next refresh retries them.
+// Each removal is a cross-process serialized firewall+state transaction
+// (forceProtection: protection policy wins even over a manual permanent
+// block committed concurrently). Failed removals remain tracked in memory
+// and in the file so the next refresh retries them.
 func (g *Guard) clearProtectedBlocks() {
 	g.mu.Lock()
 	var protected []string
@@ -163,25 +166,20 @@ func (g *Guard) clearProtectedBlocks() {
 	}
 	g.mu.Unlock()
 	for _, ip := range protected {
-		if !g.cfg.DryRun {
-			if err := g.blocker.Unblock(ip); err != nil {
-				if g.cfg.OnError != nil {
-					g.cfg.OnError(fmt.Errorf("unblock protected IP %s: %w", ip, err))
-				}
-				continue
+		if g.cfg.DryRun {
+			g.removeBlocked(ip)
+			g.mu.Lock()
+			delete(g.expiries, ip)
+			g.mu.Unlock()
+			if g.cfg.OnAudit != nil {
+				g.cfg.OnAudit("would_unblock", ip, "never-block/server IP protection", "")
+			}
+			continue
+		}
+		if g.commitUnblockDecision(ip, "never-block/server IP protection", true) == unblockCommitted {
+			if g.cfg.OnAudit != nil {
+				g.cfg.OnAudit("unblock", ip, "never-block/server IP protection", "")
 			}
 		}
-		g.removeBlocked(ip)
-		g.mu.Lock()
-		delete(g.expiries, ip)
-		g.mu.Unlock()
-		if g.cfg.OnAudit != nil {
-			action := "unblock"
-			if g.cfg.DryRun {
-				action = "would_unblock"
-			}
-			g.cfg.OnAudit(action, ip, "never-block/server IP protection", "")
-		}
-		g.saveStateDebounced()
 	}
 }
