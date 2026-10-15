@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -402,9 +403,10 @@ func runOnceMode(ctx context.Context, sources []types.LogSource, filters types.F
 			fmt.Fprintf(os.Stderr, "error reading %s: %v\n", r.Name(), err)
 			continue
 		}
-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
+		processParsedLines(ctx, lines, configuredWorkers(), func(source string, entry types.Entry, err error) {
 			if err != nil {
 				parseErrors++
+				engine.Stats().RecordSourceParseError(source)
 				bar.Add(1)
 				return
 			}
@@ -551,9 +553,15 @@ type geoLookuper interface {
 }
 
 // lookupGeo populates entry.Geo, ignoring lookup failures so unresolved IPs
-// simply keep their zero-value Geo.
+// simply keep their zero-value Geo. A typed-nil *enrich.GeoIP (the "no mmdb
+// found" result from newGeoIPEnricher) must be treated as nil: storing it in
+// the geoLookuper interface defeats the plain nil check and would dispatch
+// Lookup to a nil receiver.
 func lookupGeo(entry *types.LogEntry, geo geoLookuper) {
 	if geo == nil || entry.RemoteIP == "" {
+		return
+	}
+	if v := reflect.ValueOf(geo); v.Kind() == reflect.Ptr && v.IsNil() {
 		return
 	}
 	if info, err := geo.Lookup(entry.RemoteIP); err == nil {
@@ -663,7 +671,8 @@ func expandSourcePaths(pattern string) []string {
 // fanInFollowWithPolicy opens every source in follow mode and multiplexes its
 // lines into one channel. Returning a non-nil error from onError stops setup;
 // returning nil skips the bad source and continues with the remaining ones.
-func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onError func(string, error) error) (chan string, error) {
+// Every multiplexed line keeps the canonical source tag of its reader.
+func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onError func(string, error) error) (chan types.SourcedLine, error) {
 	readers := make([]reader.LogReader, 0, len(sources))
 	for _, src := range sources {
 		readers = append(readers, reader.FromSourceFollow(src))
@@ -671,8 +680,8 @@ func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onErr
 	return fanInFollowReaders(ctx, readers, onError)
 }
 
-func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError func(string, error) error) (chan string, error) {
-	out := make(chan string, 10000)
+func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError func(string, error) error) (chan types.SourcedLine, error) {
+	out := make(chan types.SourcedLine, 10000)
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	for _, r := range readers {
@@ -688,7 +697,7 @@ func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError
 			continue
 		}
 		wg.Add(1)
-		go func(lines <-chan string) {
+		go func(lines <-chan types.SourcedLine) {
 			defer wg.Done()
 			for l := range lines {
 				select {
@@ -709,7 +718,7 @@ func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError
 
 // fanInFollow keeps the follow/tail behavior of logging and skipping bad
 // sources while sharing the reader lifecycle with watch and guard.
-func fanInFollow(ctx context.Context, sources []types.LogSource) <-chan string {
+func fanInFollow(ctx context.Context, sources []types.LogSource) <-chan types.SourcedLine {
 	lines, _ := fanInFollowWithPolicy(ctx, sources, func(name string, err error) error {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", name, err)
 		return nil
@@ -780,8 +789,13 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
 	}
 	var reportErr error
 
-	processParsedLines(ctx, fanInFollow(ctx, sources), configuredWorkers(), func(entry types.Entry, err error) {
-		if err != nil || entry == nil {
+	processParsedLines(ctx, fanInFollow(ctx, sources), configuredWorkers(), func(source string, entry types.Entry, err error) {
+		if err != nil {
+			engine.Stats().ParseErrors++
+			engine.Stats().RecordSourceParseError(source)
+			return
+		}
+		if entry == nil {
 			return
 		}
 		switch e := entry.(type) {
@@ -868,8 +882,21 @@ func runIntervalMode(ctx context.Context, sources []types.LogSource, filters typ
 			continue
 		}
 		var processErr error
-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
-			if processErr != nil || err != nil || entry == nil {
+		processParsedLines(ctx, lines, configuredWorkers(), func(source string, entry types.Entry, err error) {
+			if processErr != nil {
+				return
+			}
+			if err != nil {
+				// The interval engine is created lazily on the first
+				// accepted entry; errors seen before that have no window
+				// to attach to, matching the previous behavior.
+				if engine != nil {
+					engine.Stats().ParseErrors++
+					engine.Stats().RecordSourceParseError(source)
+				}
+				return
+			}
+			if entry == nil {
 				return
 			}
 			switch e := entry.(type) {
@@ -952,7 +979,9 @@ func runWatch(ctx context.Context, sources []types.LogSource) error {
 		defer func() { _ = geoip.Close() }()
 	}
 
-	p := tea.NewProgram(tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns), tea.WithAltScreen())
+	model := tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns)
+	model.SetMultiSource(len(sources) > 1)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
@@ -971,7 +1000,7 @@ func createOutputFile(path string) (*os.File, error) {
 
 func resolveSources(args []string) ([]types.LogSource, error) {
 	if len(args) > 0 {
-		return parseSources(args), nil
+		return planSources(parseSources(args)), nil
 	}
 	cfg, cfgPath, err := config.Load()
 	if err == nil && cfg != nil && cfg.Source != "" {
@@ -983,12 +1012,12 @@ func resolveSources(args []string) ([]types.LogSource, error) {
 				src.Namespace = cfg.Namespace
 			}
 		}
-		return []types.LogSource{src}, nil
+		return planSources([]types.LogSource{src}), nil
 	}
 
 	fi, err := os.Stdin.Stat()
 	if err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-		return []types.LogSource{{Type: types.SourceStdin}}, nil
+		return planSources([]types.LogSource{{Type: types.SourceStdin}}), nil
 	}
 
 	candidates := []string{
@@ -1001,7 +1030,7 @@ func resolveSources(args []string) ([]types.LogSource, error) {
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
 			fmt.Fprintf(os.Stderr, "auto-detected log file: %s\n", candidate)
-			return []types.LogSource{{Type: types.SourceFile, Path: candidate}}, nil
+			return planSources([]types.LogSource{{Type: types.SourceFile, Path: candidate}}), nil
 		}
 	}
 
@@ -1011,6 +1040,35 @@ func resolveSources(args []string) ([]types.LogSource, error) {
 	return nil, fmt.Errorf(`no log source specified and no config file found.
 specify a source: <file>, -, docker://<container>, k8s://<pod>, journalctl://<unit>
 or create caddy-analyzer.json with { "source": "/var/log/caddy/access.log" }`)
+}
+
+// planSources expands file inputs into one LogSource per concrete glob match
+// and merges inputs with the same canonical identity into a single entry.
+// filepath.Glob returns sorted matches, so the resulting order (and the
+// downstream report/tail behavior) is deterministic and independent of
+// argument display order. Unmatched patterns are kept verbatim, matching the
+// reader's existing behavior, so open errors still name the requested path.
+func planSources(in []types.LogSource) []types.LogSource {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]types.LogSource, 0, len(in))
+	add := func(src types.LogSource) {
+		key := src.Canonical()
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, src)
+	}
+	for _, src := range in {
+		if src.Type == types.SourceFile {
+			for _, path := range expandSourcePaths(src.Path) {
+				add(types.LogSource{Type: types.SourceFile, Path: path})
+			}
+			continue
+		}
+		add(src)
+	}
+	return out
 }
 
 func parseSources(args []string) []types.LogSource {

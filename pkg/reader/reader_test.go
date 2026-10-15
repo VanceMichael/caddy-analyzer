@@ -12,13 +12,13 @@ import (
 	"github.com/lenny-ts/caddy-analyzer/pkg/types"
 )
 
-func readLineTimeout(t *testing.T, ch <-chan string, timeout time.Duration) (string, bool) {
+func readLineTimeout(t *testing.T, ch <-chan types.SourcedLine, timeout time.Duration) (types.SourcedLine, bool) {
 	t.Helper()
 	select {
 	case line, ok := <-ch:
 		return line, ok
 	case <-time.After(timeout):
-		return "", false
+		return types.SourcedLine{}, false
 	}
 }
 
@@ -39,7 +39,10 @@ func TestFileReaderReadsAllLines(t *testing.T) {
 
 	var got []string
 	for line := range lines {
-		got = append(got, line)
+		if line.Source != filepath.Clean(path) {
+			t.Errorf("line %q source = %q, want %q", line.Text, line.Source, filepath.Clean(path))
+		}
+		got = append(got, line.Text)
 	}
 	if len(got) != 3 {
 		t.Fatalf("expected 3 lines, got %d: %v", len(got), got)
@@ -65,17 +68,22 @@ func TestFileReaderReadsLargeLines(t *testing.T) {
 	if !ok {
 		t.Fatal("expected large line")
 	}
-	if got != line {
-		t.Fatalf("large line length = %d, want %d", len(got), len(line))
+	if got.Text != line {
+		t.Fatalf("large line length = %d, want %d", len(got.Text), len(line))
+	}
+	if got.Source != filepath.Clean(path) {
+		t.Fatalf("large line source = %q, want %q", got.Source, filepath.Clean(path))
 	}
 }
 
 func TestFileReaderGlobExpansion(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "a.log"), []byte("a\n"), 0644); err != nil {
+	pathA := filepath.Join(dir, "a.log")
+	pathB := filepath.Join(dir, "b.log")
+	if err := os.WriteFile(pathA, []byte("a\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "b.log"), []byte("b\n"), 0644); err != nil {
+	if err := os.WriteFile(pathB, []byte("b\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,12 +95,12 @@ func TestFileReaderGlobExpansion(t *testing.T) {
 		t.Fatalf("Read failed: %v", err)
 	}
 
-	seen := map[string]bool{}
+	bySource := map[string]string{}
 	for line := range lines {
-		seen[line] = true
+		bySource[line.Source] = line.Text
 	}
-	if !seen["a"] || !seen["b"] {
-		t.Errorf("glob expansion did not read both files, got %v", seen)
+	if bySource[filepath.Clean(pathA)] != "a" || bySource[filepath.Clean(pathB)] != "b" {
+		t.Errorf("glob expansion did not attribute lines to concrete files, got %v", bySource)
 	}
 }
 
@@ -112,8 +120,8 @@ func TestFileReaderFollowAppends(t *testing.T) {
 		t.Fatalf("Read failed: %v", err)
 	}
 
-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "line1" {
-		t.Fatalf("expected initial line1, got %q ok=%v", line, ok)
+	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "line1" || line.Source != filepath.Clean(path) {
+		t.Fatalf("expected initial line1 from %s, got %+v ok=%v", filepath.Clean(path), line, ok)
 	}
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
@@ -127,8 +135,8 @@ func TestFileReaderFollowAppends(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "line2" {
-		t.Fatalf("expected appended line2, got %q ok=%v", line, ok)
+	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "line2" || line.Source != filepath.Clean(path) {
+		t.Fatalf("expected appended line2 from %s, got %+v ok=%v", filepath.Clean(path), line, ok)
 	}
 }
 
@@ -155,8 +163,8 @@ func TestFileReaderFollowRotation(t *testing.T) {
 		t.Fatalf("Read failed: %v", err)
 	}
 
-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "old1" {
-		t.Fatalf("expected old1, got %q ok=%v", line, ok)
+	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "old1" {
+		t.Fatalf("expected old1, got %+v ok=%v", line, ok)
 	}
 
 	if err := os.Rename(path, path+".1"); err != nil {
@@ -168,27 +176,32 @@ func TestFileReaderFollowRotation(t *testing.T) {
 
 	for _, want := range []string{"new1", "new2"} {
 		line, ok := readLineTimeout(t, lines, 3*time.Second)
-		if !ok || line != want {
-			t.Fatalf("expected %s after rotation, got %q ok=%v", want, line, ok)
+		if !ok || line.Text != want || line.Source != filepath.Clean(path) {
+			t.Fatalf("expected %s after rotation, got %+v ok=%v", want, line, ok)
 		}
 	}
 }
 
 func TestParseSourceSchemes(t *testing.T) {
 	tests := []struct {
-		raw  string
-		want types.LogSource
+		raw       string
+		want      types.LogSource
+		canonical string
 	}{
-		{"-", types.LogSource{Type: types.SourceStdin}},
-		{"/var/log/caddy/access.log", types.LogSource{Type: types.SourceFile, Path: "/var/log/caddy/access.log"}},
-		{"docker://my-caddy", types.LogSource{Type: types.SourceDocker, Path: "my-caddy"}},
-		{"k8s://my-pod", types.LogSource{Type: types.SourceK8s, Path: "my-pod"}},
-		{"journalctl://caddy", types.LogSource{Type: types.SourceJournalctl, Path: "caddy"}},
+		{"-", types.LogSource{Type: types.SourceStdin}, "stdin"},
+		{"/var/log/caddy/access.log", types.LogSource{Type: types.SourceFile, Path: "/var/log/caddy/access.log"}, "/var/log/caddy/access.log"},
+		{"docker://my-caddy", types.LogSource{Type: types.SourceDocker, Path: "my-caddy"}, "docker://my-caddy"},
+		{"k8s://my-pod", types.LogSource{Type: types.SourceK8s, Path: "my-pod"}, "k8s://default/my-pod"},
+		{"k8s://kube-system/coredns-abc", types.LogSource{Type: types.SourceK8s, Namespace: "kube-system", Path: "coredns-abc"}, "k8s://kube-system/coredns-abc"},
+		{"journalctl://caddy", types.LogSource{Type: types.SourceJournalctl, Path: "caddy"}, "journalctl://caddy"},
 	}
 	for _, tt := range tests {
 		got := ParseSource(tt.raw)
-		if got.Type != tt.want.Type || got.Path != tt.want.Path {
+		if got.Type != tt.want.Type || got.Path != tt.want.Path || got.Namespace != tt.want.Namespace {
 			t.Errorf("ParseSource(%q) = %+v, want %+v", tt.raw, got, tt.want)
+		}
+		if got.Canonical() != tt.canonical {
+			t.Errorf("Canonical(%q) = %q, want %q", tt.raw, got.Canonical(), tt.canonical)
 		}
 	}
 }

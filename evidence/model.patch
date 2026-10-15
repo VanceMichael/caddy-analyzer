@@ -1,0 +1,2512 @@
+diff --git a/.trae/documents/multi_source_identity_plan.md b/.trae/documents/multi_source_identity_plan.md
+new file mode 100644
+index 0000000..19e9905
+--- /dev/null
++++ b/.trae/documents/multi_source_identity_plan.md
+@@ -0,0 +1,109 @@
++# 多输入来源身份（per-source identity）实施计划
++
++## Repository Research
++
++现状（已核对代码）：
++
++- 来源解析：`reader.ParseSource`（[reader.go](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/reader/reader.go#L52-L70)）只区分 type/path；`k8s://` 的 namespace 仅来自 `-n` flag（[root.go parseSources](file:///Users/vance/project/mineProject/swe/09101503/project-03/cmd/root.go#L1016-L1026)）。glob 在 `reader.expandPaths` 内展开，一个 `FileReader` 持有多路径，`Name()` 聚合成 `"N files"`。
++- 行通道：`LogReader.Read` 返回 `<-chan string`（[reader.go#L19-L22](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/reader/reader.go#L19-L22)），fan-in（[root.go#L663-L718](file:///Users/vance/project/mineProject/swe/09101503/project-03/cmd/root.go#L663-L718)）、有序并行解析（[pipeline.go](file:///Users/vance/project/mineProject/swe/09101503/project-03/cmd/pipeline.go)）、tail、watch（`chan string` → TUI `LineMsg string`）、guard（`Guard.Run(ctx, <-chan string, ...)`）全部只传裸字符串，fan-in 后来源信息丢失。
++- 统计：全局 `types.Stats` / `OperationalStats`（[types.go#L306-L496](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/types/types.go#L306-L496)）；解析错误只在 once 模式计数后写入 `Stats.ParseErrors`，follow/interval/top/baseline 不计数；`OperationalStats.ParseErrors` 声明但从未填充。
++- 输出：`output.Report` 支持 table/json/csv/html/elasticsearch/opensearch/loki（[output.go](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/output/output.go)、[remote.go](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/output/remote.go)、[html.go](file:///Users/vance/project/mineProject/swe/09101503/project-03/pkg/output/html.go)）；所有远程格式就是 `reportData()` 的单个 JSON 文档，Loki 固定 `job=caddy-analyzer, source=report` 标签。
++- top 子命令维度表（[top.go#L183-L238](file:///Users/vance/project/mineProject/swe/09101503/project-03/cmd/top.go#L183-L238)），无 source 维度。
++- 错误策略：once/interval/top 遇源打开失败打印后 `continue`；follow/tail 用 `fanInFollow` 跳过坏源；watch/guard 的 policy 返回错误即终止；文件中途错误由 `printReadError(path)` 指出具体文件。
++- 排序确定性：`analysis.TopN` 已按 count 降序、key 升序排序。
++- 单源默认行为由大量测试固定（output golden、tui 16 处 `NewModel(make(chan string))`、reader/pipeline/fanin 测试），**来源分区必须只在观测到 >1 个来源时出现**。
++
++## 设计要点
++
++### 1. 规范来源身份（canonical key）
++
++`types.LogSource.Canonical() string`：
++
++- stdin → `stdin`
++- file → `filepath.Clean(path)`（`a.log` 与 `./a.log` 合并；glob 按 `filepath.Glob` 的排序结果逐文件生成身份）
++- docker → `docker://<container>`
++- k8s → `k8s://<namespace>/<pod>`，namespace 为空时规范为 `default`
++- journalctl → `journalctl://<unit>`
++
++`reader.ParseSource` 额外支持 `k8s://<ns>/<pod>` 形式（pod 名不含 `/`，无歧义）；`-n` 仍只在 ns 为空时填充（现有逻辑不变）。
++
++新增 `types.SourcedLine{Source, Text string}` 作为所有行通道元素；`LogEntry` 与 `OperationalEntry` 增加 `Source string` 字段（parser 保持纯粹，由管线在 parse 后打标）。
++
++### 2. 来源展开与去重（cmd 层单点）
++
++新增 `planSources([]LogSource) []LogSource`：file 类型先 glob 展开（无匹配保留原 pattern，与现状一致），按 `Canonical()` 去重，其余 scheme 直接按键去重。在 `resolveSources` 的所有返回路径统一应用（args/config/stdin/自动探测）。glob 匹配到的每个文件成为独立逻辑源；重复指定合并到同一统计键。
++
++### 3. 标签随管线端到端传递
++
++- `LogReader.Read` 返回 `<-chan types.SourcedLine`：FileReader 按**具体文件路径**逐行打标（follow 多文件并发路径同样处理）；docker/k8s/journalctl/stdin 打各自规范名；打开/中途错误仍走原有 `printReadError(path)` / onError 回调，策略不变。
++- `processParsedLines` 接收 `<-chan types.SourcedLine`，job/result 结构携带 source，并行 parse 后在 reducer 内给 entry 打标（HTTP、operational、parse failure 三者都不丢标签、不串换），回调签名 `func(source string, entry types.Entry, err error)`。
++- 各消费方（once/follow/interval/top/baseline/diff/tail/watch）适配新签名。
++- guard 不改 `pkg/guard` API：在 `cmd/guard.go` 用一个桥接 goroutine 把 `SourcedLine.Text` 喂给 `Guard.Run(<-chan string)`。
++
++### 4. 按来源统计（保留全部现有全局统计）
++
++- `Stats` 增加 `SourceCounts`、`SourceParseErrors`；`OperationalStats` 增加 `SourceCounts`（均在构造函数初始化）。
++- Engine/OperationalEngine 仅对 **非空 Source** 且通过现有过滤后的条目递增（空 Source 不计，保证直接构造 entry 的旧路径无幻影来源）。
++- once 模式按来源累计 parse errors；follow/interval 模式也补齐 parse error 计数（目前完全缺失），随窗口重置。
++- 新增 `types.SourceStat{Source, Requests, OperationalEvents, ParseErrors}` 与 `analysis.SourceStats(requests, ops, errs)`：三 map 并集（跳过空键），按 `(requests+ops+errors)` 降序、source 升序**统一确定性排序**，所有格式共用。
++
++### 5. 输出一致性（仅多源时出现分区）
++
++报告按统一的 `[]SourceStat` 输出，且**仅当 distinct 来源 >1 时渲染**（单源输出字节不变）：
++
++- table：`Sources Breakdown` 小节（source / requests / operational events / parse errors）；detect 表格也加入简版来源行。
++- JSON：`"sources": [...]`（固定字段顺序、有序切片）。
++- CSV：`sources:source,requests,operational_events,parse_errors` 小节，单元格走 `SafeCell`。
++- HTML：在 `</body>` 前注入 sources 卡片（与 operational 卡片同手法）。
++- ES/OpenSearch/Loki：`reportData()` 自带 `sources` 数组，远程文档自动包含，无需改 exporter。
++- `top source` 新维度走 `SourceCounts` + `TopN`（count 降序、key 升序，与统一排序同 tie-break），JSON/CSV/table 复用现有渲染。
++
++### 6. tail / watch 多源显示
++
++- tail：`len(plannedSources)>1` 时每行前加暗色 `[source] ` 前缀（HTTP 与 operational 均加）；单源格式完全不变。
++- watch：TUI 增加 `multiSource`（`SetMultiSource` setter，构造函数签名不变）；Realtime 视图多源时行首显示截断的来源；Summary 视图多源时显示 Top Sources 列表。`LineMsg` 改为 `{Source, Text string}`，通道改为 `chan types.SourcedLine`。
++
++## Files and Modules
++
++- `pkg/types/types.go`：`Source` 字段、`Canonical()`、`SourcedLine`、`SourceStat`、Stats/OperationalStats 新 map 与初始化。
++- `pkg/reader/reader.go`：通道类型改 `SourcedLine` 并逐行打标；k8s `ns/pod` 解析。
++- `pkg/analysis/analysis.go`、`pkg/analysis/operational.go`：来源计数、`SourceStats` 聚合排序。
++- `pkg/output/output.go`：table/json/csv/detect 多源分区（共用排序）。
++- `pkg/output/html.go`：sources 卡片。
++- `pkg/tui/dashboard.go`：带来源的 LineMsg/通道、多源展示、Setter。
++- `cmd/root.go`：`planSources`、`resolveSources` 接入、fan-in 类型化、once/follow/interval/watch 适配与按来源错误计数。
++- `cmd/pipeline.go`：带 source 的有序并行解析。
++- `cmd/tail.go`、`cmd/top.go`、`cmd/baseline.go`、`cmd/diff.go`、`cmd/guard.go`：适配；top 增加 source 维度；guard 桥接。
++- 测试更新与新增：`pkg/reader/reader_test.go`、`pkg/tui/dashboard_test.go`、`cmd/pipeline_test.go`、`cmd/fanin_test.go`；新增 `pkg/types` canonical 测试、`cmd` 展开去重/标签不串换测试、`pkg/analysis` SourceStats 排序测试、`pkg/output` 多源各格式与单源不变测试、`cmd` top source 测试。
++
++## Implementation Steps
++
++1. types：字段/身份/聚合类型（含 Canonical 单测）。
++2. reader：SourcedLine 化 + 逐文件打标 + k8s ns/pod（更新 reader 测试，新增身份断言）。
++3. analysis：两个 engine 的来源计数 + `SourceStats`（单测）。
++4. cmd/pipeline.go：标签穿透有序并行解析（更新 pipeline_test）。
++5. cmd：planSources/resolveSources 去重展开；fan-in 类型化；once/follow/interval 接入（fanin_test 更新 + 新增多源标签、去重测试）。
++6. tail/top/baseline/diff/guard 适配；top source 维度。
++7. output：table/json/csv/html 多源分区（单测：多源出现、单源缺席、排序与跨格式一致）。
++8. tui：通道/消息类型与多源展示（批量更新 dashboard_test）。
++9. 全量验证与手工 CLI 冒烟。
++
++## Dependencies and Considerations
++
++- 不新增第三方依赖；不触碰 docs（无需 minify）。
++- baseline JSON 仅新增可空 map，旧基线反序列化 nil map 兼容（聚合跳过空键）。
++- 来源数量很小，来源计数不受 MaxCardinality 限制，保证可核对（各来源之和等于全局总数，过滤口径一致：均只计过滤后条目）。
++- watch 拒绝 stdin、guard 需要 root 等现有前置行为不变。
++- `-n` 与 `k8s://ns/pod` 同时出现时：URL 内 ns 优先（flag 仅在为空时填充），与现有"flag 只填空值"语义一致。
++
++## Validation
++
++- `go vet ./...`、`go test ./...`、`go build ./...` 全绿。
++- 新增单测覆盖：canonical 各 scheme（含 stdin、无 ns k8s）、glob 逐文件身份、重复源合并、并行解析标签不串换/不丢失（含 parse error 归属）、SourceStats 确定性排序、各输出格式多源一致且单源不变、top source。
++- 手工冒烟（testdata 两个文件）：table/json/csv/html 报告含一致 sources；`top source`；多源 `tail`（timeout 包裹）显示前缀、单源无前缀；坏源诊断指出准确来源且好源继续。
++
++## Risks
++
++- TUI/reader 测试面较大（通道类型变更）：逐文件机械更新 + go test 兜底；构造函数保持签名以缩小爆炸半径。
++- follow 补齐 parse error 计数属行为微调：仅限存在坏行时，单源干净日志输出不变。
++- 报告分区门槛用"观测到 >1 个来源"而非"传入 >1 个参数"：某源完全打不开时无幻影数据，错误仍由 stderr 诊断指出。
+diff --git a/cmd/baseline.go b/cmd/baseline.go
+index 0adbe1d..be48a3b 100644
+--- a/cmd/baseline.go
++++ b/cmd/baseline.go
+@@ -165,7 +165,7 @@ func analyzeSources(ctx context.Context, sources []types.LogSource, filters type
+ 		if err != nil {
+ 			return nil, nil, fmt.Errorf("read %s: %w", r.Name(), err)
+ 		}
+-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, parseErr error) {
++		processParsedLines(ctx, lines, configuredWorkers(), func(_ string, entry types.Entry, parseErr error) {
+ 			if parseErr != nil || entry == nil {
+ 				return
+ 			}
+diff --git a/cmd/diff.go b/cmd/diff.go
+index e2f5082..5a1f587 100644
+--- a/cmd/diff.go
++++ b/cmd/diff.go
+@@ -158,12 +158,13 @@ func processLogFile(ctx context.Context, path string) (*analysis.Engine, error)
+ 	}
+ 	bar := progress.New(os.Stderr, 0, "Parsing "+filepath.Base(path))
+ 	for line := range lines {
+-		entry, err := parser.Parse(line)
++		entry, err := parser.Parse(line.Text)
+ 		if err != nil || entry == nil {
+ 			bar.Add(1)
+ 			continue
+ 		}
+ 		if le, ok := entry.(*types.LogEntry); ok {
++			le.Source = line.Source
+ 			applyForwarded(le, filters)
+ 			enrichGeoIP(le, geoip)
+ 			engine.Process(le)
+diff --git a/cmd/fanin_test.go b/cmd/fanin_test.go
+index 2f3f7ec..ecb7456 100644
+--- a/cmd/fanin_test.go
++++ b/cmd/fanin_test.go
+@@ -16,6 +16,9 @@ import (
+ // test for the bug where runFollowMode/runTail iterated sources sequentially
+ // and blocked forever on the first follow reader (which only closes on
+ // ctx.Done), silently dropping every subsequent source.
++//
++// Every delivered line must also carry the canonical identity of the concrete
++// file it came from: after fan-in, attribution must survive intact.
+ func TestFanInFollowMultipleSources(t *testing.T) {
+ 	dir := t.TempDir()
+ 	f1 := filepath.Join(dir, "a.log")
+@@ -39,17 +42,23 @@ func TestFanInFollowMultipleSources(t *testing.T) {
+ 
+ 	// Collect until we have all 6 lines or time out. Follow readers deliver
+ 	// existing content first, so all 6 should arrive quickly.
+-	got := make(map[string]bool)
++	bySource := map[string]map[string]bool{}
+ 	deadline := time.After(2 * time.Second)
+-	for len(got) < 6 {
++	for len(bySource[filepath.Clean(f1)])+len(bySource[filepath.Clean(f2)]) < 6 {
+ 		select {
+ 		case line, ok := <-ch:
+ 			if !ok {
+-				t.Fatalf("channel closed before collecting all lines; got %d: %v", len(got), got)
++				t.Fatalf("channel closed before collecting all lines; got %v", bySource)
++			}
++			if bySource[line.Source] == nil {
++				bySource[line.Source] = map[string]bool{}
+ 			}
+-			got[line] = true
++			if line.Source != filepath.Clean(f1) && line.Source != filepath.Clean(f2) {
++				t.Errorf("line %q has unexpected source %q", line.Text, line.Source)
++			}
++			bySource[line.Source][line.Text] = true
+ 		case <-deadline:
+-			t.Fatalf("timeout: collected %d/%d lines: %v", len(got), 6, got)
++			t.Fatalf("timeout: collected %v", bySource)
+ 		}
+ 	}
+ 
+@@ -64,17 +73,20 @@ func TestFanInFollowMultipleSources(t *testing.T) {
+ 		t.Fatal("channel did not close after context cancellation")
+ 	}
+ 
+-	// The fix's whole point: lines from BOTH sources must be present. Before
+-	// the fix only f1's lines ("a*") would arrive.
+-	for _, want := range []string{"a1", "a2", "a3", "b1", "b2", "b3"} {
+-		if !got[want] {
+-			t.Errorf("missing line %q from fan-in; got %v", want, got)
++	// The fix's whole point: lines from BOTH sources must be present with
++	// the right source label on every line.
++	for text, wantSource := range map[string]string{
++		"a1": filepath.Clean(f1), "a2": filepath.Clean(f1), "a3": filepath.Clean(f1),
++		"b1": filepath.Clean(f2), "b2": filepath.Clean(f2), "b3": filepath.Clean(f2),
++	} {
++		if !bySource[wantSource][text] {
++			t.Errorf("missing or mislabeled line %q (want source %s); got %v", text, wantSource, bySource)
+ 		}
+ 	}
+ }
+ 
+ // TestFanInFollowBadSourceSkipped ensures a failing source does not abort the
+-// fan-in: remaining sources must still be delivered.
++// fan-in: remaining sources must still be delivered with their own identity.
+ func TestFanInFollowBadSourceSkipped(t *testing.T) {
+ 	dir := t.TempDir()
+ 	good := filepath.Join(dir, "good.log")
+@@ -100,7 +112,10 @@ func TestFanInFollowBadSourceSkipped(t *testing.T) {
+ 			if !ok {
+ 				t.Fatalf("channel closed early; got %v", got)
+ 			}
+-			got[line] = true
++			if line.Source != filepath.Clean(good) {
++				t.Errorf("line %q source = %q, want %q", line.Text, line.Source, filepath.Clean(good))
++			}
++			got[line.Text] = true
+ 		case <-deadline:
+ 			t.Fatalf("timeout: got %v", got)
+ 		}
+@@ -115,7 +130,7 @@ type errorFollowReader struct{}
+ 
+ func (errorFollowReader) Name() string { return "broken" }
+ 
+-func (errorFollowReader) Read(context.Context) (<-chan string, error) {
++func (errorFollowReader) Read(context.Context) (<-chan types.SourcedLine, error) {
+ 	return nil, os.ErrNotExist
+ }
+ 
+diff --git a/cmd/follow_filter_test.go b/cmd/follow_filter_test.go
+index a025400..e4357b6 100644
+--- a/cmd/follow_filter_test.go
++++ b/cmd/follow_filter_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/lenny-ts/caddy-analyzer/pkg/enrich"
+ 	"github.com/lenny-ts/caddy-analyzer/pkg/types"
+ )
+ 
+@@ -236,3 +237,19 @@ func TestPrepareEntryEnrichesBeforeMatchForGeoFilters(t *testing.T) {
+ 		t.Fatalf("lookups = %v, want none for rejected rows without geo filters", geo2.hits)
+ 	}
+ }
++
++// TestPrepareEntryTypedNilGeoIP is the regression test for follow mode
++// crashing when no GeoIP mmdb is available: newGeoIPEnricher returns a typed
++// nil *enrich.GeoIP, which inside the geoLookuper interface must behave like
++// "no enricher" instead of dispatching Lookup to a nil receiver.
++func TestPrepareEntryTypedNilGeoIP(t *testing.T) {
++	var geo *enrich.GeoIP
++	entry := &types.LogEntry{Method: "GET", Status: 200, URI: "/", RemoteIP: "1.1.1.1"}
++	if !prepareEntry(entry, types.Filters{}, geo) {
++		t.Fatal("entry must be accepted with a nil GeoIP enricher")
++	}
++	// Must not panic and must leave Geo unresolved.
++	if entry.Geo.CountryCode != "" {
++		t.Fatalf("unexpected geo enrichment: %+v", entry.Geo)
++	}
++}
+diff --git a/cmd/guard.go b/cmd/guard.go
+index 77e1f61..7c88fd5 100644
+--- a/cmd/guard.go
++++ b/cmd/guard.go
+@@ -167,6 +167,30 @@ func runGuard(cmd *cobra.Command, args []string) error {
+ 		return err
+ 	}
+ 
++	// Guard's sliding-window engine consumes raw lines; bridge the
++	// tagged fan-in to the string channel it expects while preserving
++	// cancellation. Lines already queued by other sources keep flowing
++	// even if one source ends or fails to open.
++	rawLines := make(chan string, 1000)
++	go func() {
++		defer close(rawLines)
++		for {
++			select {
++			case <-ctx.Done():
++				return
++			case line, ok := <-linesCh:
++				if !ok {
++					return
++				}
++				select {
++				case rawLines <- line.Text:
++				case <-ctx.Done():
++					return
++				}
++			}
++		}
++	}()
++
+ 	guardNotify.auditLog = guardAuditLog
+ 	dispatcher, err := guardNotify.dispatcher()
+ 	if err != nil {
+@@ -384,7 +408,7 @@ func runGuard(cmd *cobra.Command, args []string) error {
+ 
+ 	done := make(chan struct{})
+ 	go func() {
+-		g.Run(ctx, linesCh, logf)
++		g.Run(ctx, rawLines, logf)
+ 		close(done)
+ 	}()
+ 
+diff --git a/cmd/pipeline.go b/cmd/pipeline.go
+index e062952..a4c9e3e 100644
+--- a/cmd/pipeline.go
++++ b/cmd/pipeline.go
+@@ -10,25 +10,44 @@ import (
+ )
+ 
+ type parsedResult struct {
+-	seq   uint64
+-	entry types.Entry
+-	err   error
++	seq    uint64
++	source string
++	entry  types.Entry
++	err    error
++}
++
++// tagEntry stamps the parsed entry with the canonical source of its input
++// line. Parsing stays source-agnostic; the label is attached here after the
++// workers return, which guarantees concurrent workers can never swap labels.
++func tagEntry(entry types.Entry, source string) {
++	switch e := entry.(type) {
++	case *types.LogEntry:
++		e.Source = source
++	case *types.OperationalEntry:
++		e.Source = source
++	}
+ }
+ 
+ // processParsedLines parses input concurrently and reduces results in input
+ // order. Keeping the reducer ordered preserves stateful detector semantics.
+-func processParsedLines(ctx context.Context, lines <-chan string, workers int, fn func(types.Entry, error)) {
++// Every result (HTTP entry, operational entry, or parse failure) carries the
++// source label of its input line.
++func processParsedLines(ctx context.Context, lines <-chan types.SourcedLine, workers int, fn func(source string, entry types.Entry, err error)) {
+ 	if workers <= 1 {
+ 		for line := range lines {
+-			entry, err := parser.Parse(line)
+-			fn(entry, err)
++			entry, err := parser.Parse(line.Text)
++			if err == nil {
++				tagEntry(entry, line.Source)
++			}
++			fn(line.Source, entry, err)
+ 		}
+ 		return
+ 	}
+ 
+ 	type job struct {
+-		seq  uint64
+-		line string
++		seq    uint64
++		source string
++		line   string
+ 	}
+ 	jobs := make(chan job)
+ 	results := make(chan parsedResult, workers*2)
+@@ -39,7 +58,7 @@ func processParsedLines(ctx context.Context, lines <-chan string, workers int, f
+ 			defer wg.Done()
+ 			for j := range jobs {
+ 				entry, err := parser.Parse(j.line)
+-				results <- parsedResult{seq: j.seq, entry: entry, err: err}
++				results <- parsedResult{seq: j.seq, source: j.source, entry: entry, err: err}
+ 			}
+ 		}()
+ 	}
+@@ -48,7 +67,7 @@ func processParsedLines(ctx context.Context, lines <-chan string, workers int, f
+ 		seq := uint64(0)
+ 		for line := range lines {
+ 			select {
+-			case jobs <- job{seq: seq, line: line}:
++			case jobs <- job{seq: seq, source: line.Source, line: line.Text}:
+ 				seq++
+ 			case <-ctx.Done():
+ 				close(jobs)
+@@ -65,13 +84,19 @@ func processParsedLines(ctx context.Context, lines <-chan string, workers int, f
+ 	pending := make(map[uint64]parsedResult)
+ 	next := uint64(0)
+ 	for result := range results {
++		// The label is attached on the reducing goroutine only, after
++		// ordering is restored, so it can never be attributed to another
++		// source's line.
++		if result.err == nil {
++			tagEntry(result.entry, result.source)
++		}
+ 		pending[result.seq] = result
+ 		for {
+ 			ready, ok := pending[next]
+ 			if !ok {
+ 				break
+ 			}
+-			fn(ready.entry, ready.err)
++			fn(ready.source, ready.entry, ready.err)
+ 			delete(pending, next)
+ 			next++
+ 		}
+diff --git a/cmd/pipeline_test.go b/cmd/pipeline_test.go
+index 58dd7c3..ddf8209 100644
+--- a/cmd/pipeline_test.go
++++ b/cmd/pipeline_test.go
+@@ -9,21 +9,27 @@ import (
+ )
+ 
+ func TestProcessParsedLinesPreservesInputOrder(t *testing.T) {
+-	lines := make(chan string, 3)
+-	lines <- `{"level":"info","ts":1,"msg":"first"}`
+-	lines <- `{"level":"info","ts":2,"msg":"second"}`
+-	lines <- `{"level":"info","ts":3,"msg":"third"}`
++	lines := make(chan types.SourcedLine, 3)
++	lines <- types.SourcedLine{Source: "stdin", Text: `{"level":"info","ts":1,"msg":"first"}`}
++	lines <- types.SourcedLine{Source: "stdin", Text: `{"level":"info","ts":2,"msg":"second"}`}
++	lines <- types.SourcedLine{Source: "stdin", Text: `{"level":"info","ts":3,"msg":"third"}`}
+ 	close(lines)
+ 
+ 	var got []string
+-	processParsedLines(context.Background(), lines, 4, func(entry types.Entry, err error) {
++	processParsedLines(context.Background(), lines, 4, func(source string, entry types.Entry, err error) {
+ 		if err != nil {
+ 			t.Fatalf("parse failed: %v", err)
+ 		}
++		if source != "stdin" {
++			t.Errorf("source = %q, want stdin", source)
++		}
+ 		op, ok := entry.(*types.OperationalEntry)
+ 		if !ok {
+ 			t.Fatalf("entry type = %T, want operational entry", entry)
+ 		}
++		if op.Source != "stdin" {
++			t.Errorf("tagged entry source = %q, want stdin", op.Source)
++		}
+ 		got = append(got, op.Msg)
+ 	})
+ 
+@@ -38,6 +44,50 @@ func TestProcessParsedLinesPreservesInputOrder(t *testing.T) {
+ 	}
+ }
+ 
++// TestProcessParsedLinesKeepsSourceLabels mixes two sources with parse
++// failures and verifies every result (including errors) is attributed to the
++// source of its own line while global input order is preserved.
++func TestProcessParsedLinesKeepsSourceLabels(t *testing.T) {
++	lines := make(chan types.SourcedLine, 6)
++	lines <- types.SourcedLine{Source: "a.log", Text: `{"level":"info","ts":1,"msg":"a1"}`}
++	lines <- types.SourcedLine{Source: "b.log", Text: "not json"}
++	lines <- types.SourcedLine{Source: "b.log", Text: `{"level":"info","ts":2,"msg":"b2"}`}
++	lines <- types.SourcedLine{Source: "a.log", Text: "garbage"}
++	close(lines)
++
++	type result struct {
++		source string
++		msg    string
++		err    bool
++	}
++	var got []result
++	processParsedLines(context.Background(), lines, 4, func(source string, entry types.Entry, err error) {
++		r := result{source: source, err: err != nil}
++		if op, ok := entry.(*types.OperationalEntry); ok {
++			r.msg = op.Msg
++			if op.Source != source {
++				t.Errorf("entry label %q != callback source %q", op.Source, source)
++			}
++		}
++		got = append(got, r)
++	})
++
++	want := []result{
++		{source: "a.log", msg: "a1"},
++		{source: "b.log", err: true},
++		{source: "b.log", msg: "b2"},
++		{source: "a.log", err: true},
++	}
++	if len(got) != len(want) {
++		t.Fatalf("got %d results %v, want %d", len(got), got, len(want))
++	}
++	for i := range want {
++		if got[i] != want[i] {
++			t.Errorf("result %d = %+v, want %+v", i, got[i], want[i])
++		}
++	}
++}
++
+ func TestCountTotalLinesForLocalSources(t *testing.T) {
+ 	path := t.TempDir() + "/access.log"
+ 	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+diff --git a/cmd/plan_sources_test.go b/cmd/plan_sources_test.go
+new file mode 100644
+index 0000000..a66c8cf
+--- /dev/null
++++ b/cmd/plan_sources_test.go
+@@ -0,0 +1,95 @@
++package cmd
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++func TestPlanSourcesExpandsGlobAndDedupes(t *testing.T) {
++	dir := t.TempDir()
++	fA := filepath.Join(dir, "a.log")
++	fB := filepath.Join(dir, "b.log")
++	for _, p := range []string{fA, fB} {
++		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	in := []types.LogSource{
++		// Glob expands to concrete, sorted file identities.
++		{Type: types.SourceFile, Path: filepath.Join(dir, "*.log")},
++		// Same file via a different spelling must merge into one key.
++		{Type: types.SourceFile, Path: fA},
++		// Repeated scheme source merges too.
++		{Type: types.SourceDocker, Path: "caddy"},
++		{Type: types.SourceDocker, Path: "caddy"},
++	}
++	got := planSources(in)
++	if len(got) != 3 {
++		t.Fatalf("planned %d sources %v, want 3 (a.log, b.log, docker)", len(got), got)
++	}
++	if got[0].Path != fA || got[1].Path != fB {
++		t.Errorf("glob matches must be concrete files in sorted order, got %v %v", got[0].Path, got[1].Path)
++	}
++	for _, s := range got {
++		if s.Type == types.SourceDocker && s.Canonical() != "docker://caddy" {
++			t.Errorf("docker canonical = %q", s.Canonical())
++		}
++	}
++}
++
++func TestPlanSourcesKeepsUnmatchedPattern(t *testing.T) {
++	missing := filepath.Join(t.TempDir(), "nope.log")
++	got := planSources([]types.LogSource{{Type: types.SourceFile, Path: missing}})
++	if len(got) != 1 || got[0].Path != missing {
++		t.Fatalf("unmatched pattern must be preserved for an accurate open error, got %+v", got)
++	}
++}
++
++func TestPlanSourcesK8sDefaultNamespaceMerges(t *testing.T) {
++	got := planSources([]types.LogSource{
++		{Type: types.SourceK8s, Path: "pod"},
++		{Type: types.SourceK8s, Namespace: types.DefaultK8sNamespace, Path: "pod"},
++	})
++	if len(got) != 1 {
++		t.Fatalf("k8s default-namespace spellings must merge, got %+v", got)
++	}
++	if got[0].Canonical() != "k8s://default/pod" {
++		t.Fatalf("canonical = %q", got[0].Canonical())
++	}
++}
++
++func TestPlanSourcesStdinIdentity(t *testing.T) {
++	got := planSources([]types.LogSource{
++		{Type: types.SourceStdin},
++		{Type: types.SourceStdin},
++	})
++	if len(got) != 1 || got[0].Canonical() != "stdin" {
++		t.Fatalf("stdin must dedupe to one key, got %+v", got)
++	}
++}
++
++func TestTopSourceDimension(t *testing.T) {
++	s := types.NewStats()
++	s.SourceCounts["b.log"] = 3
++	s.SourceCounts["a.log"] = 5
++
++	if field, ok := topFieldForDimension("source"); !ok || field != types.TopSource {
++		t.Fatalf("source dimension lookup = %v, %v", field, ok)
++	}
++	items := topItems("source", s, 10)
++	if len(items) != 2 || items[0].Key != "a.log" || items[0].Count != 5 || items[1].Key != "b.log" {
++		t.Fatalf("top source items = %+v, want a.log(5), b.log(3)", items)
++	}
++	if topTitle("sources") != "Sources" {
++		t.Errorf("source title = %q", topTitle("sources"))
++	}
++	for _, name := range []string{"source", "sources"} {
++		if !isSupportedDimension(name) {
++			t.Errorf("%s must be a supported dimension", name)
++		}
++	}
++}
+diff --git a/cmd/root.go b/cmd/root.go
+index ec11342..2d474c7 100644
+--- a/cmd/root.go
++++ b/cmd/root.go
+@@ -8,6 +8,7 @@ import (
+ 	"os"
+ 	"os/signal"
+ 	"path/filepath"
++	"reflect"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -402,9 +403,10 @@ func runOnceMode(ctx context.Context, sources []types.LogSource, filters types.F
+ 			fmt.Fprintf(os.Stderr, "error reading %s: %v\n", r.Name(), err)
+ 			continue
+ 		}
+-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
++		processParsedLines(ctx, lines, configuredWorkers(), func(source string, entry types.Entry, err error) {
+ 			if err != nil {
+ 				parseErrors++
++				engine.Stats().RecordSourceParseError(source)
+ 				bar.Add(1)
+ 				return
+ 			}
+@@ -551,11 +553,17 @@ type geoLookuper interface {
+ }
+ 
+ // lookupGeo populates entry.Geo, ignoring lookup failures so unresolved IPs
+-// simply keep their zero-value Geo.
++// simply keep their zero-value Geo. A typed-nil *enrich.GeoIP (the "no mmdb
++// found" result from newGeoIPEnricher) must be treated as nil: storing it in
++// the geoLookuper interface defeats the plain nil check and would dispatch
++// Lookup to a nil receiver.
+ func lookupGeo(entry *types.LogEntry, geo geoLookuper) {
+ 	if geo == nil || entry.RemoteIP == "" {
+ 		return
+ 	}
++	if v := reflect.ValueOf(geo); v.Kind() == reflect.Ptr && v.IsNil() {
++		return
++	}
+ 	if info, err := geo.Lookup(entry.RemoteIP); err == nil {
+ 		entry.Geo = info
+ 	}
+@@ -663,7 +671,8 @@ func expandSourcePaths(pattern string) []string {
+ // fanInFollowWithPolicy opens every source in follow mode and multiplexes its
+ // lines into one channel. Returning a non-nil error from onError stops setup;
+ // returning nil skips the bad source and continues with the remaining ones.
+-func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onError func(string, error) error) (chan string, error) {
++// Every multiplexed line keeps the canonical source tag of its reader.
++func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onError func(string, error) error) (chan types.SourcedLine, error) {
+ 	readers := make([]reader.LogReader, 0, len(sources))
+ 	for _, src := range sources {
+ 		readers = append(readers, reader.FromSourceFollow(src))
+@@ -671,8 +680,8 @@ func fanInFollowWithPolicy(ctx context.Context, sources []types.LogSource, onErr
+ 	return fanInFollowReaders(ctx, readers, onError)
+ }
+ 
+-func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError func(string, error) error) (chan string, error) {
+-	out := make(chan string, 10000)
++func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError func(string, error) error) (chan types.SourcedLine, error) {
++	out := make(chan types.SourcedLine, 10000)
+ 	ctx, cancel := context.WithCancel(ctx)
+ 	var wg sync.WaitGroup
+ 	for _, r := range readers {
+@@ -688,7 +697,7 @@ func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError
+ 			continue
+ 		}
+ 		wg.Add(1)
+-		go func(lines <-chan string) {
++		go func(lines <-chan types.SourcedLine) {
+ 			defer wg.Done()
+ 			for l := range lines {
+ 				select {
+@@ -709,7 +718,7 @@ func fanInFollowReaders(ctx context.Context, readers []reader.LogReader, onError
+ 
+ // fanInFollow keeps the follow/tail behavior of logging and skipping bad
+ // sources while sharing the reader lifecycle with watch and guard.
+-func fanInFollow(ctx context.Context, sources []types.LogSource) <-chan string {
++func fanInFollow(ctx context.Context, sources []types.LogSource) <-chan types.SourcedLine {
+ 	lines, _ := fanInFollowWithPolicy(ctx, sources, func(name string, err error) error {
+ 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", name, err)
+ 		return nil
+@@ -780,8 +789,13 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
+ 	}
+ 	var reportErr error
+ 
+-	processParsedLines(ctx, fanInFollow(ctx, sources), configuredWorkers(), func(entry types.Entry, err error) {
+-		if err != nil || entry == nil {
++	processParsedLines(ctx, fanInFollow(ctx, sources), configuredWorkers(), func(source string, entry types.Entry, err error) {
++		if err != nil {
++			engine.Stats().ParseErrors++
++			engine.Stats().RecordSourceParseError(source)
++			return
++		}
++		if entry == nil {
+ 			return
+ 		}
+ 		switch e := entry.(type) {
+@@ -868,8 +882,21 @@ func runIntervalMode(ctx context.Context, sources []types.LogSource, filters typ
+ 			continue
+ 		}
+ 		var processErr error
+-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
+-			if processErr != nil || err != nil || entry == nil {
++		processParsedLines(ctx, lines, configuredWorkers(), func(source string, entry types.Entry, err error) {
++			if processErr != nil {
++				return
++			}
++			if err != nil {
++				// The interval engine is created lazily on the first
++				// accepted entry; errors seen before that have no window
++				// to attach to, matching the previous behavior.
++				if engine != nil {
++					engine.Stats().ParseErrors++
++					engine.Stats().RecordSourceParseError(source)
++				}
++				return
++			}
++			if entry == nil {
+ 				return
+ 			}
+ 			switch e := entry.(type) {
+@@ -952,7 +979,9 @@ func runWatch(ctx context.Context, sources []types.LogSource) error {
+ 		defer func() { _ = geoip.Close() }()
+ 	}
+ 
+-	p := tea.NewProgram(tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns), tea.WithAltScreen())
++	model := tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns)
++	model.SetMultiSource(len(sources) > 1)
++	p := tea.NewProgram(model, tea.WithAltScreen())
+ 	_, err = p.Run()
+ 	return err
+ }
+@@ -971,7 +1000,7 @@ func createOutputFile(path string) (*os.File, error) {
+ 
+ func resolveSources(args []string) ([]types.LogSource, error) {
+ 	if len(args) > 0 {
+-		return parseSources(args), nil
++		return planSources(parseSources(args)), nil
+ 	}
+ 	cfg, cfgPath, err := config.Load()
+ 	if err == nil && cfg != nil && cfg.Source != "" {
+@@ -983,12 +1012,12 @@ func resolveSources(args []string) ([]types.LogSource, error) {
+ 				src.Namespace = cfg.Namespace
+ 			}
+ 		}
+-		return []types.LogSource{src}, nil
++		return planSources([]types.LogSource{src}), nil
+ 	}
+ 
+ 	fi, err := os.Stdin.Stat()
+ 	if err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+-		return []types.LogSource{{Type: types.SourceStdin}}, nil
++		return planSources([]types.LogSource{{Type: types.SourceStdin}}), nil
+ 	}
+ 
+ 	candidates := []string{
+@@ -1001,7 +1030,7 @@ func resolveSources(args []string) ([]types.LogSource, error) {
+ 	for _, candidate := range candidates {
+ 		if _, err := os.Stat(candidate); err == nil {
+ 			fmt.Fprintf(os.Stderr, "auto-detected log file: %s\n", candidate)
+-			return []types.LogSource{{Type: types.SourceFile, Path: candidate}}, nil
++			return planSources([]types.LogSource{{Type: types.SourceFile, Path: candidate}}), nil
+ 		}
+ 	}
+ 
+@@ -1013,6 +1042,35 @@ specify a source: <file>, -, docker://<container>, k8s://<pod>, journalctl://<un
+ or create caddy-analyzer.json with { "source": "/var/log/caddy/access.log" }`)
+ }
+ 
++// planSources expands file inputs into one LogSource per concrete glob match
++// and merges inputs with the same canonical identity into a single entry.
++// filepath.Glob returns sorted matches, so the resulting order (and the
++// downstream report/tail behavior) is deterministic and independent of
++// argument display order. Unmatched patterns are kept verbatim, matching the
++// reader's existing behavior, so open errors still name the requested path.
++func planSources(in []types.LogSource) []types.LogSource {
++	seen := make(map[string]struct{}, len(in))
++	out := make([]types.LogSource, 0, len(in))
++	add := func(src types.LogSource) {
++		key := src.Canonical()
++		if _, ok := seen[key]; ok {
++			return
++		}
++		seen[key] = struct{}{}
++		out = append(out, src)
++	}
++	for _, src := range in {
++		if src.Type == types.SourceFile {
++			for _, path := range expandSourcePaths(src.Path) {
++				add(types.LogSource{Type: types.SourceFile, Path: path})
++			}
++			continue
++		}
++		add(src)
++	}
++	return out
++}
++
+ func parseSources(args []string) []types.LogSource {
+ 	s := make([]types.LogSource, 0, len(args))
+ 	for _, a := range args {
+diff --git a/cmd/tail.go b/cmd/tail.go
+index e38f7ba..71edc7d 100644
+--- a/cmd/tail.go
++++ b/cmd/tail.go
+@@ -115,29 +115,36 @@ func runTail(cmd *cobra.Command, args []string) error {
+ 		}
+ 	}
+ 
++	// In a multi-source session every line is prefixed with its canonical
++	// source; single-source sessions keep the original compact layout.
++	multi := len(sources) > 1
++
+ 	for line := range fanInFollow(ctx, sources) {
+-		entry, err := parser.Parse(line)
++		entry, err := parser.Parse(line.Text)
+ 		if err != nil || entry == nil {
+ 			continue
+ 		}
++		prefix := sourcePrefix(line.Source, multi)
+ 		switch e := entry.(type) {
+ 		case *types.LogEntry:
+ 			if filters.OpsOnly {
+ 				continue
+ 			}
++			e.Source = line.Source
+ 			applyForwarded(e, filters)
+ 			enrichGeoIP(e, geoip)
+ 			if !analysis.MatchEntry(e, filters) {
+ 				continue
+ 			}
+-			if err := printColorizedLog(e, det); err != nil {
++			if err := printColorizedLog(e, det, prefix); err != nil {
+ 				break
+ 			}
+ 		case *types.OperationalEntry:
+ 			if !analysis.MatchOperational(e, filters) {
+ 				continue
+ 			}
+-			if err := printColorizedOperational(e); err != nil {
++			e.Source = line.Source
++			if err := printColorizedOperational(e, prefix); err != nil {
+ 				break
+ 			}
+ 		}
+@@ -145,7 +152,17 @@ func runTail(cmd *cobra.Command, args []string) error {
+ 	return nil
+ }
+ 
+-func printColorizedLog(e *types.LogEntry, det *analysis.Detector) error {
++// sourcePrefix renders the dim source tag for multi-source tail sessions.
++// It returns an empty string in single-source sessions so the compact
++// single-source layout is byte-identical to the old behavior.
++func sourcePrefix(source string, multi bool) string {
++	if !multi || source == "" {
++		return ""
++	}
++	return styleTailDim.Render("[" + source + "] ")
++}
++
++func printColorizedLog(e *types.LogEntry, det *analysis.Detector, prefix string) error {
+ 	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
+ 	statusStr := formatStatus(e.Status)
+ 	methodStr := lipgloss.NewStyle().Bold(true).Render(e.Method)
+@@ -220,8 +237,8 @@ func printColorizedLog(e *types.LogEntry, det *analysis.Detector) error {
+ 		}
+ 	}
+ 
+-	_, err := fmt.Printf("%s  %s  %s %s  (%s, %s) - %s%s%s%s\n",
+-		timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStyled, geoInfo, uaInfo, threatSuffix)
++	_, err := fmt.Printf("%s%s  %s  %s %s  (%s, %s) - %s%s%s%s\n",
++		prefix, timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStyled, geoInfo, uaInfo, threatSuffix)
+ 	return err
+ }
+ 
+@@ -241,7 +258,7 @@ func formatStatus(s int) string {
+ 	}
+ }
+ 
+-func printColorizedOperational(e *types.OperationalEntry) error {
++func printColorizedOperational(e *types.OperationalEntry, prefix string) error {
+ 	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
+ 
+ 	var lvlStr string
+@@ -290,6 +307,6 @@ func printColorizedOperational(e *types.OperationalEntry) error {
+ 		extraStr = styleTailDim.Render(" " + strings.Join(extras, " "))
+ 	}
+ 
+-	_, err := fmt.Printf("%s  %s  %s  %s%s\n", timeStr, lvlStr, loggerStr, msgStr, extraStr)
++	_, err := fmt.Printf("%s%s  %s  %s  %s%s\n", prefix, timeStr, lvlStr, loggerStr, msgStr, extraStr)
+ 	return err
+ }
+diff --git a/cmd/top.go b/cmd/top.go
+index 6614e05..ce85a80 100644
+--- a/cmd/top.go
++++ b/cmd/top.go
+@@ -37,6 +37,7 @@ Dimensions:
+   country     Top client countries (requires GeoIP mmdb)
+   city        Top client cities (requires a city GeoIP mmdb)
+   asn         Top client autonomous systems (requires GeoIP mmdb)
++  source      Top input sources by request count (files, docker://, k8s://, journalctl://, stdin)
+ 
+ Useful Flags:
+   -t, --top <N>      Number of top entries to display (default: 10)
+@@ -105,7 +106,7 @@ func runTopCmd(cmd *cobra.Command, args []string) error {
+ 		if err != nil {
+ 			continue
+ 		}
+-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
++		processParsedLines(ctx, lines, configuredWorkers(), func(_ string, entry types.Entry, err error) {
+ 			if err != nil || entry == nil {
+ 				bar.Add(1)
+ 				return
+@@ -200,6 +201,8 @@ func topFieldForDimension(dim string) (types.TopField, bool) {
+ 		return types.TopCity, true
+ 	case "asn":
+ 		return types.TopASN, true
++	case "source", "sources":
++		return types.TopSource, true
+ 	case "bandwidth", "bytes":
+ 		return types.TopPath, true
+ 	}
+@@ -233,6 +236,8 @@ func topItems(dim string, s *types.Stats, n int) []types.CountItem {
+ 		return analysis.TopN(s.CityCounts, n)
+ 	case "asn":
+ 		return analysis.TopN(s.ASNCounts, n)
++	case "source", "sources":
++		return analysis.TopN(s.SourceCounts, n)
+ 	}
+ 	return nil
+ }
+@@ -259,6 +264,8 @@ func topTitle(dim string) string {
+ 		return "Cities"
+ 	case "asn":
+ 		return "Autonomous Systems"
++	case "source", "sources":
++		return "Sources"
+ 	}
+ 	return "Results"
+ }
+@@ -283,7 +290,7 @@ func writeTopCSV(w io.Writer, items []types.CountItem) error {
+ 
+ func isSupportedDimension(s string) bool {
+ 	switch strings.ToLower(s) {
+-	case "path", "paths", "ip", "ips", "ua", "useragent", "user-agent", "status", "method", "methods", "host", "hosts", "bandwidth", "bytes", "country", "countries", "city", "cities", "asn":
++	case "path", "paths", "ip", "ips", "ua", "useragent", "user-agent", "status", "method", "methods", "host", "hosts", "bandwidth", "bytes", "country", "countries", "city", "cities", "asn", "source", "sources":
+ 		return true
+ 	}
+ 	return false
+diff --git a/pkg/analysis/analysis.go b/pkg/analysis/analysis.go
+index aaa59f6..9ba8b3a 100644
+--- a/pkg/analysis/analysis.go
++++ b/pkg/analysis/analysis.go
+@@ -136,6 +136,13 @@ func (e *Engine) Process(entry *types.LogEntry) {
+ 	s := e.stats
+ 	s.TotalRequests++
+ 
++	// Attribute the accepted request to its canonical source. Entries
++	// constructed outside the tagged pipeline carry an empty source and
++	// are not counted here, keeping single-source/default output intact.
++	if entry.Source != "" {
++		s.SourceCounts[entry.Source]++
++	}
++
+ 	if !entry.Timestamp.IsZero() {
+ 		if s.StartTime.IsZero() || entry.Timestamp.Before(s.StartTime) {
+ 			s.StartTime = entry.Timestamp
+@@ -291,6 +298,50 @@ func TopNInt(m map[int]int64, n int) []types.CountIntItem {
+ 	return items
+ }
+ 
++// SourceStats merges per-source HTTP request, operational event, and parse
++// error counters into reconciliation rows with one deterministic order used
++// by every report format (table, JSON, CSV, HTML, Elasticsearch/OpenSearch,
++// Loki) so the same inputs always produce the same source ranking. Rows are
++// sorted by total activity (requests + events + errors) descending, then by
++// canonical source name ascending. Empty source keys (untagged entries) are
++// skipped so untagged/single-source flows produce no phantom rows.
++func SourceStats(requests, events, parseErrors map[string]int64) []types.SourceStat {
++	keys := make(map[string]struct{})
++	for k := range requests {
++		if k != "" {
++			keys[k] = struct{}{}
++		}
++	}
++	for k := range events {
++		if k != "" {
++			keys[k] = struct{}{}
++		}
++	}
++	for k := range parseErrors {
++		if k != "" {
++			keys[k] = struct{}{}
++		}
++	}
++	rows := make([]types.SourceStat, 0, len(keys))
++	for k := range keys {
++		rows = append(rows, types.SourceStat{
++			Source:            k,
++			Requests:          requests[k],
++			OperationalEvents: events[k],
++			ParseErrors:       parseErrors[k],
++		})
++	}
++	sort.Slice(rows, func(i, j int) bool {
++		ti := rows[i].Requests + rows[i].OperationalEvents + rows[i].ParseErrors
++		tj := rows[j].Requests + rows[j].OperationalEvents + rows[j].ParseErrors
++		if ti != tj {
++			return ti > tj
++		}
++		return rows[i].Source < rows[j].Source
++	})
++	return rows
++}
++
+ func (e *Engine) match(entry *types.LogEntry) bool {
+ 	return MatchEntry(entry, e.filters)
+ }
+diff --git a/pkg/analysis/operational.go b/pkg/analysis/operational.go
+index 65ace5c..ece1c47 100644
+--- a/pkg/analysis/operational.go
++++ b/pkg/analysis/operational.go
+@@ -33,6 +33,13 @@ func (e *OperationalEngine) Process(entry *types.OperationalEntry) {
+ 	s := e.stats
+ 	s.TotalEvents++
+ 
++	if entry.Source != "" {
++		if s.SourceCounts == nil {
++			s.SourceCounts = make(map[string]int64)
++		}
++		s.SourceCounts[entry.Source]++
++	}
++
+ 	if !entry.Timestamp.IsZero() {
+ 		if s.StartTime.IsZero() || entry.Timestamp.Before(s.StartTime) {
+ 			s.StartTime = entry.Timestamp
+diff --git a/pkg/analysis/source_stats_test.go b/pkg/analysis/source_stats_test.go
+new file mode 100644
+index 0000000..48e2aea
+--- /dev/null
++++ b/pkg/analysis/source_stats_test.go
+@@ -0,0 +1,72 @@
++package analysis
++
++import (
++	"testing"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++func TestSourceStatsMergeOrderAndSkipEmpty(t *testing.T) {
++	requests := map[string]int64{"a.log": 5, "b.log": 2, "": 9}
++	events := map[string]int64{"k8s://default/pod": 4, "a.log": 1}
++	errors := map[string]int64{"b.log": 10}
++
++	rows := SourceStats(requests, events, errors)
++
++	// Empty key must never produce a phantom row.
++	for _, r := range rows {
++		if r.Source == "" {
++			t.Fatalf("empty source produced a row: %+v", rows)
++		}
++	}
++
++	// Deterministic order: total activity desc, source name asc on ties.
++	want := []types.SourceStat{
++		{Source: "b.log", Requests: 2, ParseErrors: 10},      // total 12
++		{Source: "a.log", Requests: 5, OperationalEvents: 1}, // total 6
++		{Source: "k8s://default/pod", OperationalEvents: 4},  // total 4
++	}
++	if len(rows) != len(want) {
++		t.Fatalf("rows = %+v, want %+v", rows, want)
++	}
++	for i := range want {
++		if rows[i] != want[i] {
++			t.Errorf("row %d = %+v, want %+v", i, rows[i], want[i])
++		}
++	}
++}
++
++func TestSourceStatsTieBreakByName(t *testing.T) {
++	rows := SourceStats(
++		map[string]int64{"z.log": 1, "a.log": 1},
++		nil, nil,
++	)
++	if len(rows) != 2 || rows[0].Source != "a.log" || rows[1].Source != "z.log" {
++		t.Fatalf("tie break wrong: %+v", rows)
++	}
++
++	// Nil/empty maps → no rows.
++	if rows := SourceStats(nil, nil, nil); len(rows) != 0 {
++		t.Fatalf("expected no rows, got %+v", rows)
++	}
++}
++
++func TestEngineAttributesRequestsToSource(t *testing.T) {
++	engine := New(types.Filters{})
++	engine.Process(&types.LogEntry{Source: "a.log", Method: "GET", URI: "/", Status: 200})
++	engine.Process(&types.LogEntry{Source: "a.log", Method: "GET", URI: "/", Status: 200})
++	engine.Process(&types.LogEntry{Source: "b.log", Method: "GET", URI: "/", Status: 200})
++	// Directly constructed entry without source: not attributed.
++	engine.Process(&types.LogEntry{Method: "GET", URI: "/", Status: 200})
++
++	s := engine.Stats()
++	if s.SourceCounts["a.log"] != 2 || s.SourceCounts["b.log"] != 1 {
++		t.Fatalf("source counts = %v, want a.log=2 b.log=1", s.SourceCounts)
++	}
++	if _, ok := s.SourceCounts[""]; ok {
++		t.Fatal("untagged entry must not create an empty-source key")
++	}
++	if s.TotalRequests != 4 {
++		t.Fatalf("global total = %d, want 4", s.TotalRequests)
++	}
++}
+diff --git a/pkg/output/html.go b/pkg/output/html.go
+index 5c15fbd..f113861 100644
+--- a/pkg/output/html.go
++++ b/pkg/output/html.go
+@@ -33,7 +33,11 @@ func (r *Report) printHTML() error {
+ 	out := generateHTMLReport(s, total, r.engine.RPS(), r.engine.AvgDuration(),
+ 		topPaths, topIPs, topUAs, topMethods, topCountries, topCities, topASNs, topProtos, topTLS, topBots, topReferers, topPathBytes, suspicious, r.detect, r.activeFilters(), s.SuspiciousDetails)
+ 
+-	// Inject operational events card before </body> if present
++	// Inject multi-source and operational cards before </body> if present.
++	// The sources card is omitted for single-source sessions.
++	if rows := r.sourceRows(); len(rows) > 1 {
++		out = strings.Replace(out, "</body>", generateSourcesHTML(rows)+"</body>", 1)
++	}
+ 	if r.opStats != nil && r.opStats.TotalEvents > 0 {
+ 		op := generateOperationalHTML(r.opStats, r.top)
+ 		out = strings.Replace(out, "</body>", op+"</body>", 1)
+@@ -461,6 +465,24 @@ func escapeHTML(s string) string {
+ 	return html.EscapeString(s)
+ }
+ 
++// generateSourcesHTML renders the per-source reconciliation card for the
++// HTML report. Rows arrive in the shared deterministic order, so HTML output
++// ranks sources identically to table/JSON/CSV/remote formats.
++func generateSourcesHTML(rows []types.SourceStat) string {
++	var body string
++	for _, row := range rows {
++		errCell := ""
++		if row.ParseErrors > 0 {
++			errCell = fmt.Sprintf(`<td class="count" style="color:#f87171">%d</td>`, row.ParseErrors)
++		} else {
++			errCell = fmt.Sprintf(`<td class="count">%d</td>`, row.ParseErrors)
++		}
++		body += fmt.Sprintf(`<tr><td>%s</td><td class="count">%d</td><td class="count">%d</td>%s</tr>`,
++			escapeHTML(row.Source), row.Requests, row.OperationalEvents, errCell)
++	}
++	return fmt.Sprintf(`<div class="card"><h2>Sources</h2><table><thead><tr><th>Source</th><th>Requests</th><th>Operational Events</th><th>Parse Errors</th></tr></thead><tbody>%s</tbody></table></div>`, body)
++}
++
+ // generateOperationalHTML renders the Operational Events card for the HTML
+ // report. Returns an empty string when there are no events so the card is
+ // omitted entirely.
+diff --git a/pkg/output/output.go b/pkg/output/output.go
+index 7a2a323..cfb33b4 100644
+--- a/pkg/output/output.go
++++ b/pkg/output/output.go
+@@ -125,6 +125,18 @@ func (r *Report) SetOperationalStats(s *types.OperationalStats) {
+ 	r.opStats = s
+ }
+ 
++// sourceRows builds the deterministic per-source reconciliation rows shared
++// by every formatter. Callers render the section only when more than one
++// distinct source was observed so single-source output stays unchanged.
++func (r *Report) sourceRows() []types.SourceStat {
++	s := r.engine.Stats()
++	var opCounts map[string]int64
++	if r.opStats != nil {
++		opCounts = r.opStats.SourceCounts
++	}
++	return analysis.SourceStats(s.SourceCounts, opCounts, s.SourceParseErrors)
++}
++
+ func (r *Report) activeFilters() []string {
+ 	var f []string
+ 	if r.filters.HasFrom {
+@@ -520,6 +532,21 @@ func (r *Report) printTable() error {
+ 		_, _ = fmt.Fprintf(w, "%s\t%d\n\n", renderLabel(styleError, "Parse Errors:"), s.ParseErrors)
+ 	}
+ 
++	if rows := r.sourceRows(); len(rows) > 1 {
++		title := "Sources Breakdown"
++		if useColor {
++			title = styleLabel.Render(title)
++		}
++		_, _ = fmt.Fprintf(w, "%s:\n", title)
++		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n",
++			styleDim.Render("Source"), styleDim.Render("Requests"),
++			styleDim.Render("Operational Events"), styleDim.Render("Parse Errors"))
++		for _, row := range rows {
++			_, _ = fmt.Fprintf(w, "  %s\t%d\t%d\t%d\n", stripANSI(row.Source), row.Requests, row.OperationalEvents, row.ParseErrors)
++		}
++		_, _ = fmt.Fprintln(w)
++	}
++
+ 	if r.top > 0 {
+ 		if r.sections.Path {
+ 			title := fmt.Sprintf("Top %d Paths", r.top)
+@@ -705,6 +732,19 @@ func (r *Report) printDetectTable(s *types.Stats, total int64, useColor bool, ew
+ 	}
+ 	_, _ = fmt.Fprintf(w, "%s\t%d requests\n\n", label, total)
+ 
++	if rows := r.sourceRows(); len(rows) > 1 {
++		srcLabel := "Sources:"
++		if useColor {
++			srcLabel = styleLabel.Render(srcLabel)
++		}
++		_, _ = fmt.Fprintf(w, "%s\n", srcLabel)
++		for _, row := range rows {
++			_, _ = fmt.Fprintf(w, "  %s\t%d requests, %d operational events, %d parse errors\n",
++				stripANSI(row.Source), row.Requests, row.OperationalEvents, row.ParseErrors)
++		}
++		_, _ = fmt.Fprintln(w)
++	}
++
+ 	if len(s.SuspiciousIPs) > 0 {
+ 		alertLabel := fmt.Sprintf("[ALERT] THREAT ALERTS DETECTED (%d suspicious IPs)", len(s.SuspiciousIPs))
+ 		if useColor {
+@@ -823,6 +863,12 @@ func (r *Report) reportData() map[string]interface{} {
+ 		"parse_errors": s.ParseErrors,
+ 	}
+ 
++	// Per-source breakdown only for multi-source sessions, keeping
++	// single-source JSON byte-identical to the previous output.
++	if rows := r.sourceRows(); len(rows) > 1 {
++		data["sources"] = rows
++	}
++
+ 	if r.detect && len(s.SuspiciousIPs) > 0 {
+ 		data["suspicious_ips"] = analysis.TopN(s.SuspiciousIPs, 20)
+ 		data["suspicious_details"] = s.SuspiciousDetails
+@@ -914,6 +960,13 @@ func (r *Report) printCSV() error {
+ 	writePair("duration_p95", fmt.Sprintf("%.6f", s.Percentile95))
+ 	writePair("duration_p99", fmt.Sprintf("%.6f", s.Percentile99))
+ 
++	if rows := r.sourceRows(); len(rows) > 1 {
++		writeSection([]string{"sources:source", "requests", "operational_events", "parse_errors"})
++		for _, row := range rows {
++			write([]string{row.Source, fmt.Sprintf("%d", row.Requests), fmt.Sprintf("%d", row.OperationalEvents), fmt.Sprintf("%d", row.ParseErrors)})
++		}
++	}
++
+ 	if r.detect && len(s.SuspiciousIPs) > 0 {
+ 		writeSection([]string{"suspicious_ips:ip", "count"})
+ 		for _, item := range analysis.TopN(s.SuspiciousIPs, 20) {
+diff --git a/pkg/output/sources_test.go b/pkg/output/sources_test.go
+new file mode 100644
+index 0000000..dad82ce
+--- /dev/null
++++ b/pkg/output/sources_test.go
+@@ -0,0 +1,199 @@
++package output
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/analysis"
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++// multiSourceFixture builds engines with traffic split across two sources
++// plus operational events and parse errors attributed to each.
++func multiSourceFixture(t *testing.T) (*analysis.Engine, *analysis.OperationalEngine) {
++	t.Helper()
++	engine := analysis.New(types.Filters{})
++	// b.log has more traffic → it must rank first in every format.
++	for i := 0; i < 5; i++ {
++		engine.Process(&types.LogEntry{Source: "b.log", Method: "GET", URI: "/b", Host: "h", Status: 200, Size: 10})
++	}
++	engine.Process(&types.LogEntry{Source: "a.log", Method: "GET", URI: "/a", Host: "h", Status: 200, Size: 10})
++	s := engine.Stats()
++	s.ParseErrors = 3
++	s.RecordSourceParseError("a.log")
++	s.RecordSourceParseError("a.log")
++	s.RecordSourceParseError("b.log")
++	engine.Finalize()
++
++	op := analysis.NewOperationalEngine(types.Filters{})
++	op.Process(&types.OperationalEntry{Source: "a.log", Level: "info", Msg: "started"})
++
++	return engine, op
++}
++
++func TestReportSourcesAllFormatsConsistent(t *testing.T) {
++	engine, op := multiSourceFixture(t)
++
++	wantOrder := []string{"b.log", "a.log"}
++	for _, format := range []Format{FormatTable, FormatJSON, FormatCSV, FormatHTML} {
++		t.Run(string(format), func(t *testing.T) {
++			var buf bytes.Buffer
++			report := NewReport(engine, format, 5)
++			report.SetWriter(&buf)
++			report.SetOperationalStats(op.Stats())
++			if err := report.Print(); err != nil {
++				t.Fatalf("Print failed: %v", err)
++			}
++			out := buf.String()
++
++			switch format {
++			case FormatTable:
++				if !strings.Contains(out, "Sources Breakdown") {
++					t.Errorf("table report missing Sources Breakdown:\n%s", out)
++				}
++			case FormatCSV:
++				if !strings.Contains(out, "sources:source,requests,operational_events,parse_errors") {
++					t.Errorf("csv report missing sources section:\n%s", out)
++				}
++			case FormatHTML:
++				if !strings.Contains(out, "<h2>Sources</h2>") {
++					t.Errorf("html report missing sources card:\n%s", out)
++				}
++			case FormatJSON:
++				var data map[string]json.RawMessage
++				if err := json.Unmarshal([]byte(out), &data); err != nil {
++					t.Fatalf("invalid json: %v", err)
++				}
++				raw, ok := data["sources"]
++				if !ok {
++					t.Fatal("json report missing sources key")
++				}
++				var rows []types.SourceStat
++				if err := json.Unmarshal(raw, &rows); err != nil {
++					t.Fatalf("decode sources: %v", err)
++				}
++				if len(rows) != 2 {
++					t.Fatalf("sources rows = %d, want 2", len(rows))
++				}
++				for i, want := range wantOrder {
++					if rows[i].Source != want {
++						t.Errorf("json source rank %d = %q, want %q", i, rows[i].Source, want)
++					}
++				}
++				if rows[0].Requests != 5 || rows[1].Requests != 1 {
++					t.Errorf("unexpected request counts: %+v", rows)
++				}
++				if rows[1].OperationalEvents != 1 || rows[1].ParseErrors != 2 {
++					t.Errorf("a.log row reconciliation wrong: %+v", rows[1])
++				}
++				if rows[0].ParseErrors != 1 {
++					t.Errorf("b.log parse errors = %d, want 1", rows[0].ParseErrors)
++				}
++			}
++
++			// Both sources must be named in every format.
++			for _, name := range wantOrder {
++				if !strings.Contains(out, name) {
++					t.Errorf("%s output missing source %q", format, name)
++				}
++			}
++		})
++	}
++}
++
++// TestReportSingleSourceOmitsBreakdown guarantees single-source sessions keep
++// byte-identical default behavior: no sources section in any format.
++func TestReportSingleSourceOmitsBreakdown(t *testing.T) {
++	engine := analysis.New(types.Filters{})
++	engine.Process(&types.LogEntry{Source: "only.log", Method: "GET", URI: "/", Host: "h", Status: 200, Size: 1})
++	engine.Finalize()
++
++	for _, format := range []Format{FormatTable, FormatJSON, FormatCSV, FormatHTML} {
++		t.Run(string(format), func(t *testing.T) {
++			var buf bytes.Buffer
++			report := NewReport(engine, format, 5)
++			report.SetWriter(&buf)
++			if err := report.Print(); err != nil {
++				t.Fatalf("Print failed: %v", err)
++			}
++			out := buf.String()
++			for _, marker := range []string{"Sources Breakdown", `"sources"`, "sources:source", "<h2>Sources</h2>"} {
++				if strings.Contains(out, marker) {
++					t.Errorf("single-source %s output unexpectedly contains %q", format, marker)
++				}
++			}
++		})
++	}
++}
++
++// TestReportRemoteExportsCarrySources verifies the same sources array reaches
++// Elasticsearch/OpenSearch bulk documents and Loki pushes, so remote formats
++// agree with the local formats.
++func TestReportRemoteExportsCarrySources(t *testing.T) {
++	engine, op := multiSourceFixture(t)
++
++	for _, tc := range []struct {
++		name   string
++		format Format
++		build  func(url string) (RemoteExporter, error)
++	}{
++		{"elasticsearch", FormatElasticsearch, func(url string) (RemoteExporter, error) {
++			return NewElasticsearchExporter(RemoteConfig{URL: url, Index: "ix"})
++		}},
++		{"loki", FormatLoki, func(url string) (RemoteExporter, error) {
++			return NewLokiExporter(RemoteConfig{URL: url, Index: "ix"})
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var body bytes.Buffer
++			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				b, _ := io.ReadAll(r.Body)
++				body.Write(b)
++				w.WriteHeader(http.StatusOK)
++				_, _ = w.Write([]byte(`{}`))
++			}))
++			defer ts.Close()
++
++			exporter, err := tc.build(ts.URL)
++			if err != nil {
++				t.Fatal(err)
++			}
++			report := NewReport(engine, tc.format, 5)
++			report.SetOperationalStats(op.Stats())
++			report.SetRemoteExporter(exporter)
++			if err := report.Print(); err != nil {
++				t.Fatalf("Print failed: %v", err)
++			}
++			payload := body.String()
++			// Loki embeds the report document as an escaped JSON string
++			// inside its "values" array; ES/OpenSearch send raw NDJSON.
++			hasArray := strings.Contains(payload, `"sources":[`) || strings.Contains(payload, `\"sources\":[`)
++			if !hasArray || !strings.Contains(payload, "b.log") || !strings.Contains(payload, "a.log") {
++				t.Fatalf("%s payload missing sources array:\n%s", tc.name, payload)
++			}
++		})
++	}
++}
++
++// TestReportDetectTableIncludesSources covers the --detect table path, which
++// has its own renderer.
++func TestReportDetectTableIncludesSources(t *testing.T) {
++	engine, op := multiSourceFixture(t)
++	var buf bytes.Buffer
++	report := NewReport(engine, FormatTable, 5)
++	report.SetDetect(true)
++	report.SetWriter(&buf)
++	report.SetOperationalStats(op.Stats())
++	if err := report.Print(); err != nil {
++		t.Fatalf("Print failed: %v", err)
++	}
++	out := buf.String()
++	if !strings.Contains(out, "Sources:") || !strings.Contains(out, "b.log") || !strings.Contains(out, "a.log") {
++		t.Errorf("detect table missing sources block:\n%s", out)
++	}
++}
+diff --git a/pkg/reader/reader.go b/pkg/reader/reader.go
+index 5820ffe..067dc5b 100644
+--- a/pkg/reader/reader.go
++++ b/pkg/reader/reader.go
+@@ -17,7 +17,7 @@ import (
+ )
+ 
+ type LogReader interface {
+-	Read(ctx context.Context) (<-chan string, error)
++	Read(ctx context.Context) (<-chan types.SourcedLine, error)
+ 	Name() string
+ }
+ 
+@@ -36,8 +36,6 @@ func fromSource(src types.LogSource, follow bool) LogReader {
+ 	switch src.Type {
+ 	case types.SourceStdin:
+ 		return &StdinReader{}
+-	case types.SourceFile:
+-		return &FileReader{paths: expandPaths(src.Path), follow: follow}
+ 	case types.SourceDocker:
+ 		return &DockerReader{container: src.Path, follow: follow}
+ 	case types.SourceK8s:
+@@ -60,7 +58,14 @@ func ParseSource(raw string) types.LogSource {
+ 		case "docker":
+ 			return types.LogSource{Type: types.SourceDocker, Path: parts[1]}
+ 		case "k8s":
+-			return types.LogSource{Type: types.SourceK8s, Path: parts[1]}
++			// Accept both k8s://pod and k8s://namespace/pod. Pod names
++			// cannot contain "/", so the first segment is unambiguous.
++			pod := parts[1]
++			ns := ""
++			if idx := strings.Index(pod, "/"); idx >= 0 {
++				ns, pod = pod[:idx], pod[idx+1:]
++			}
++			return types.LogSource{Type: types.SourceK8s, Path: pod, Namespace: ns}
+ 		case "journalctl":
+ 			return types.LogSource{Type: types.SourceJournalctl, Path: parts[1]}
+ 		}
+@@ -77,15 +82,30 @@ func expandPaths(pattern string) []string {
+ 	return matches
+ }
+ 
+-func newLineChannel() chan string {
+-	return make(chan string, 1000)
++// sourceID returns the canonical statistics key for a concrete file path.
++func sourceID(path string) string {
++	return filepath.Clean(path)
++}
++
++func newLineChannel() chan types.SourcedLine {
++	return make(chan types.SourcedLine, 1000)
++}
++
++// emitLine sends one tagged line, honoring cancellation.
++func emitLine(ctx context.Context, out chan<- types.SourcedLine, source, line string) error {
++	select {
++	case out <- types.SourcedLine{Source: source, Text: line}:
++		return nil
++	case <-ctx.Done():
++		return ctx.Err()
++	}
+ }
+ 
+ type StdinReader struct{}
+ 
+ func (r *StdinReader) Name() string { return "stdin" }
+ 
+-func (r *StdinReader) Read(ctx context.Context) (<-chan string, error) {
++func (r *StdinReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
+ 	// Defense-in-depth: resolveSources already refuses the stdin fallback
+ 	// when stdin is a TTY, but a caller can still construct a StdinReader
+ 	// directly (e.g. explicit "-"). Reading from a TTY with bufio.Scanner
+@@ -100,9 +120,7 @@ func (r *StdinReader) Read(ctx context.Context) (<-chan string, error) {
+ 		scanner := bufio.NewScanner(os.Stdin)
+ 		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
+ 		for scanner.Scan() {
+-			select {
+-			case out <- scanner.Text():
+-			case <-ctx.Done():
++			if err := emitLine(ctx, out, "stdin", scanner.Text()); err != nil {
+ 				return
+ 			}
+ 		}
+@@ -122,7 +140,7 @@ func (r *FileReader) Name() string {
+ 	return fmt.Sprintf("%d files", len(r.paths))
+ }
+ 
+-func (r *FileReader) Read(ctx context.Context) (<-chan string, error) {
++func (r *FileReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
+ 	out := newLineChannel()
+ 	if r.follow && len(r.paths) > 1 {
+ 		// In follow mode with multiple files, read them concurrently
+@@ -161,32 +179,32 @@ func (r *FileReader) Read(ctx context.Context) (<-chan string, error) {
+ 	return out, nil
+ }
+ 
+-func readFileLines(ctx context.Context, path string, out chan<- string) error {
++func readFileLines(ctx context.Context, path string, out chan<- types.SourcedLine) error {
+ 	f, err := os.Open(path)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer func() { _ = f.Close() }()
+ 
++	source := sourceID(path)
+ 	scanner := bufio.NewScanner(f)
+ 	scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
+ 	for scanner.Scan() {
+-		select {
+-		case out <- scanner.Text():
+-		case <-ctx.Done():
+-			return ctx.Err()
++		if err := emitLine(ctx, out, source, scanner.Text()); err != nil {
++			return err
+ 		}
+ 	}
+ 	return scanner.Err()
+ }
+ 
+-func readFileAndFollow(ctx context.Context, path string, out chan<- string) error {
++func readFileAndFollow(ctx context.Context, path string, out chan<- types.SourcedLine) error {
+ 	f, err := os.Open(path)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer func() { _ = f.Close() }()
+ 
++	source := sourceID(path)
+ 	initialInfo, err := f.Stat()
+ 	if err != nil {
+ 		return err
+@@ -205,10 +223,8 @@ func readFileAndFollow(ctx context.Context, path string, out chan<- string) erro
+ 			break
+ 		}
+ 		line = strings.TrimRight(line, "\n")
+-		select {
+-		case out <- line:
+-		case <-ctx.Done():
+-			return ctx.Err()
++		if err := emitLine(ctx, out, source, line); err != nil {
++			return err
+ 		}
+ 	}
+ 
+@@ -259,10 +275,8 @@ func readFileAndFollow(ctx context.Context, path string, out chan<- string) erro
+ 					break
+ 				}
+ 				line = strings.TrimRight(line, "\n")
+-				select {
+-				case out <- line:
+-				case <-ctx.Done():
+-					return ctx.Err()
++				if err := emitLine(ctx, out, source, line); err != nil {
++					return err
+ 				}
+ 			}
+ 
+@@ -278,7 +292,10 @@ type DockerReader struct {
+ 
+ func (r *DockerReader) Name() string { return "docker:" + r.container }
+ 
+-func (r *DockerReader) Read(ctx context.Context) (<-chan string, error) {
++// Source returns the canonical source identity for statistics.
++func (r *DockerReader) Source() string { return "docker://" + r.container }
++
++func (r *DockerReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
+ 	out := newLineChannel()
+ 	args := []string{"logs"}
+ 	if r.follow {
+@@ -292,7 +309,7 @@ func (r *DockerReader) Read(ctx context.Context) (<-chan string, error) {
+ 	args = append(args, r.container)
+ 
+ 	cmd := exec.CommandContext(ctx, "docker", args...)
+-	return execLines(ctx, cmd, out)
++	return execLines(ctx, cmd, r.Source(), out)
+ }
+ 
+ type K8sReader struct {
+@@ -301,15 +318,23 @@ type K8sReader struct {
+ 	follow    bool
+ }
+ 
+-func (r *K8sReader) Name() string {
+-	ns := r.namespace
+-	if ns == "" {
+-		ns = "default"
++func (r *K8sReader) namespaceOrDefault() string {
++	if r.namespace == "" {
++		return types.DefaultK8sNamespace
+ 	}
+-	return fmt.Sprintf("k8s:%s (ns:%s)", r.pod, ns)
++	return r.namespace
+ }
+ 
+-func (r *K8sReader) Read(ctx context.Context) (<-chan string, error) {
++func (r *K8sReader) Name() string {
++	return fmt.Sprintf("k8s:%s (ns:%s)", r.pod, r.namespaceOrDefault())
++}
++
++// Source returns the canonical source identity (namespace + pod).
++func (r *K8sReader) Source() string {
++	return fmt.Sprintf("k8s://%s/%s", r.namespaceOrDefault(), r.pod)
++}
++
++func (r *K8sReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
+ 	out := newLineChannel()
+ 	args := []string{"logs", "--tail=-1"}
+ 	if r.follow {
+@@ -321,7 +346,7 @@ func (r *K8sReader) Read(ctx context.Context) (<-chan string, error) {
+ 	args = append(args, r.pod)
+ 
+ 	cmd := exec.CommandContext(ctx, "kubectl", args...)
+-	return execLines(ctx, cmd, out)
++	return execLines(ctx, cmd, r.Source(), out)
+ }
+ 
+ type JournalctlReader struct {
+@@ -331,17 +356,20 @@ type JournalctlReader struct {
+ 
+ func (r *JournalctlReader) Name() string { return "journalctl:" + r.unit }
+ 
+-func (r *JournalctlReader) Read(ctx context.Context) (<-chan string, error) {
++// Source returns the canonical source identity for statistics.
++func (r *JournalctlReader) Source() string { return "journalctl://" + r.unit }
++
++func (r *JournalctlReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
+ 	out := newLineChannel()
+ 	args := []string{"-u", r.unit, "--output=cat"}
+ 	if r.follow {
+ 		args = append(args, "--follow")
+ 	}
+ 	cmd := exec.CommandContext(ctx, "journalctl", args...)
+-	return execLines(ctx, cmd, out)
++	return execLines(ctx, cmd, r.Source(), out)
+ }
+ 
+-func execLines(ctx context.Context, cmd *exec.Cmd, out chan string) (<-chan string, error) {
++func execLines(ctx context.Context, cmd *exec.Cmd, source string, out chan types.SourcedLine) (<-chan types.SourcedLine, error) {
+ 	pr, pw := io.Pipe()
+ 	cmd.Stdout = pw
+ 	cmd.Stderr = pw
+@@ -359,9 +387,7 @@ func execLines(ctx context.Context, cmd *exec.Cmd, out chan string) (<-chan stri
+ 		scanner := bufio.NewScanner(pr)
+ 		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
+ 		for scanner.Scan() {
+-			select {
+-			case out <- scanner.Text():
+-			case <-ctx.Done():
++			if err := emitLine(ctx, out, source, scanner.Text()); err != nil {
+ 				_ = cmd.Process.Kill()
+ 				_ = cmd.Wait()
+ 				return
+diff --git a/pkg/reader/reader_test.go b/pkg/reader/reader_test.go
+index cc5aa6e..f42c953 100644
+--- a/pkg/reader/reader_test.go
++++ b/pkg/reader/reader_test.go
+@@ -12,13 +12,13 @@ import (
+ 	"github.com/lenny-ts/caddy-analyzer/pkg/types"
+ )
+ 
+-func readLineTimeout(t *testing.T, ch <-chan string, timeout time.Duration) (string, bool) {
++func readLineTimeout(t *testing.T, ch <-chan types.SourcedLine, timeout time.Duration) (types.SourcedLine, bool) {
+ 	t.Helper()
+ 	select {
+ 	case line, ok := <-ch:
+ 		return line, ok
+ 	case <-time.After(timeout):
+-		return "", false
++		return types.SourcedLine{}, false
+ 	}
+ }
+ 
+@@ -39,7 +39,10 @@ func TestFileReaderReadsAllLines(t *testing.T) {
+ 
+ 	var got []string
+ 	for line := range lines {
+-		got = append(got, line)
++		if line.Source != filepath.Clean(path) {
++			t.Errorf("line %q source = %q, want %q", line.Text, line.Source, filepath.Clean(path))
++		}
++		got = append(got, line.Text)
+ 	}
+ 	if len(got) != 3 {
+ 		t.Fatalf("expected 3 lines, got %d: %v", len(got), got)
+@@ -65,17 +68,22 @@ func TestFileReaderReadsLargeLines(t *testing.T) {
+ 	if !ok {
+ 		t.Fatal("expected large line")
+ 	}
+-	if got != line {
+-		t.Fatalf("large line length = %d, want %d", len(got), len(line))
++	if got.Text != line {
++		t.Fatalf("large line length = %d, want %d", len(got.Text), len(line))
++	}
++	if got.Source != filepath.Clean(path) {
++		t.Fatalf("large line source = %q, want %q", got.Source, filepath.Clean(path))
+ 	}
+ }
+ 
+ func TestFileReaderGlobExpansion(t *testing.T) {
+ 	dir := t.TempDir()
+-	if err := os.WriteFile(filepath.Join(dir, "a.log"), []byte("a\n"), 0644); err != nil {
++	pathA := filepath.Join(dir, "a.log")
++	pathB := filepath.Join(dir, "b.log")
++	if err := os.WriteFile(pathA, []byte("a\n"), 0644); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if err := os.WriteFile(filepath.Join(dir, "b.log"), []byte("b\n"), 0644); err != nil {
++	if err := os.WriteFile(pathB, []byte("b\n"), 0644); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+@@ -87,12 +95,12 @@ func TestFileReaderGlobExpansion(t *testing.T) {
+ 		t.Fatalf("Read failed: %v", err)
+ 	}
+ 
+-	seen := map[string]bool{}
++	bySource := map[string]string{}
+ 	for line := range lines {
+-		seen[line] = true
++		bySource[line.Source] = line.Text
+ 	}
+-	if !seen["a"] || !seen["b"] {
+-		t.Errorf("glob expansion did not read both files, got %v", seen)
++	if bySource[filepath.Clean(pathA)] != "a" || bySource[filepath.Clean(pathB)] != "b" {
++		t.Errorf("glob expansion did not attribute lines to concrete files, got %v", bySource)
+ 	}
+ }
+ 
+@@ -112,8 +120,8 @@ func TestFileReaderFollowAppends(t *testing.T) {
+ 		t.Fatalf("Read failed: %v", err)
+ 	}
+ 
+-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "line1" {
+-		t.Fatalf("expected initial line1, got %q ok=%v", line, ok)
++	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "line1" || line.Source != filepath.Clean(path) {
++		t.Fatalf("expected initial line1 from %s, got %+v ok=%v", filepath.Clean(path), line, ok)
+ 	}
+ 
+ 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+@@ -127,8 +135,8 @@ func TestFileReaderFollowAppends(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "line2" {
+-		t.Fatalf("expected appended line2, got %q ok=%v", line, ok)
++	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "line2" || line.Source != filepath.Clean(path) {
++		t.Fatalf("expected appended line2 from %s, got %+v ok=%v", filepath.Clean(path), line, ok)
+ 	}
+ }
+ 
+@@ -155,8 +163,8 @@ func TestFileReaderFollowRotation(t *testing.T) {
+ 		t.Fatalf("Read failed: %v", err)
+ 	}
+ 
+-	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line != "old1" {
+-		t.Fatalf("expected old1, got %q ok=%v", line, ok)
++	if line, ok := readLineTimeout(t, lines, 2*time.Second); !ok || line.Text != "old1" {
++		t.Fatalf("expected old1, got %+v ok=%v", line, ok)
+ 	}
+ 
+ 	if err := os.Rename(path, path+".1"); err != nil {
+@@ -168,28 +176,33 @@ func TestFileReaderFollowRotation(t *testing.T) {
+ 
+ 	for _, want := range []string{"new1", "new2"} {
+ 		line, ok := readLineTimeout(t, lines, 3*time.Second)
+-		if !ok || line != want {
+-			t.Fatalf("expected %s after rotation, got %q ok=%v", want, line, ok)
++		if !ok || line.Text != want || line.Source != filepath.Clean(path) {
++			t.Fatalf("expected %s after rotation, got %+v ok=%v", want, line, ok)
+ 		}
+ 	}
+ }
+ 
+ func TestParseSourceSchemes(t *testing.T) {
+ 	tests := []struct {
+-		raw  string
+-		want types.LogSource
++		raw       string
++		want      types.LogSource
++		canonical string
+ 	}{
+-		{"-", types.LogSource{Type: types.SourceStdin}},
+-		{"/var/log/caddy/access.log", types.LogSource{Type: types.SourceFile, Path: "/var/log/caddy/access.log"}},
+-		{"docker://my-caddy", types.LogSource{Type: types.SourceDocker, Path: "my-caddy"}},
+-		{"k8s://my-pod", types.LogSource{Type: types.SourceK8s, Path: "my-pod"}},
+-		{"journalctl://caddy", types.LogSource{Type: types.SourceJournalctl, Path: "caddy"}},
++		{"-", types.LogSource{Type: types.SourceStdin}, "stdin"},
++		{"/var/log/caddy/access.log", types.LogSource{Type: types.SourceFile, Path: "/var/log/caddy/access.log"}, "/var/log/caddy/access.log"},
++		{"docker://my-caddy", types.LogSource{Type: types.SourceDocker, Path: "my-caddy"}, "docker://my-caddy"},
++		{"k8s://my-pod", types.LogSource{Type: types.SourceK8s, Path: "my-pod"}, "k8s://default/my-pod"},
++		{"k8s://kube-system/coredns-abc", types.LogSource{Type: types.SourceK8s, Namespace: "kube-system", Path: "coredns-abc"}, "k8s://kube-system/coredns-abc"},
++		{"journalctl://caddy", types.LogSource{Type: types.SourceJournalctl, Path: "caddy"}, "journalctl://caddy"},
+ 	}
+ 	for _, tt := range tests {
+ 		got := ParseSource(tt.raw)
+-		if got.Type != tt.want.Type || got.Path != tt.want.Path {
++		if got.Type != tt.want.Type || got.Path != tt.want.Path || got.Namespace != tt.want.Namespace {
+ 			t.Errorf("ParseSource(%q) = %+v, want %+v", tt.raw, got, tt.want)
+ 		}
++		if got.Canonical() != tt.canonical {
++			t.Errorf("Canonical(%q) = %q, want %q", tt.raw, got.Canonical(), tt.canonical)
++		}
+ 	}
+ }
+ 
+diff --git a/pkg/tui/dashboard.go b/pkg/tui/dashboard.go
+index 33814f6..4bb37ef 100644
+--- a/pkg/tui/dashboard.go
++++ b/pkg/tui/dashboard.go
+@@ -17,7 +17,14 @@ import (
+ )
+ 
+ type TickMsg time.Time
+-type LineMsg string
++
++// LineMsg is one raw input line tagged with the canonical source it came
++// from. In single-source sessions Source is rendered nowhere so the
++// compact layout is preserved.
++type LineMsg struct {
++	Source string
++	Text   string
++}
+ type StreamEndMsg struct{}
+ 
+ type view int
+@@ -35,10 +42,14 @@ const (
+ )
+ 
+ type Model struct {
+-	engine      *analysis.Engine
+-	opEngine    *analysis.OperationalEngine
+-	detector    *analysis.Detector
+-	linesCh     chan string
++	engine   *analysis.Engine
++	opEngine *analysis.OperationalEngine
++	detector *analysis.Detector
++	linesCh  chan types.SourcedLine
++	// multiSource enables the source column/prefix and the Top Sources
++	// summary block. It is set from cmd when more than one distinct
++	// logical source is being followed.
++	multiSource bool
+ 	ready       bool
+ 	width       int
+ 	height      int
+@@ -78,18 +89,24 @@ var (
+ 	styleTailPath = lipgloss.NewStyle().Bold(true)
+ )
+ 
+-func NewModel(linesCh chan string) Model {
++func NewModel(linesCh chan types.SourcedLine) Model {
+ 	return NewModelWithGeoIP(linesCh, nil)
+ }
+ 
++// SetMultiSource toggles per-source display (realtime prefixes and the
++// summary Top Sources block). Must be called before the program starts.
++func (m *Model) SetMultiSource(multi bool) {
++	m.multiSource = multi
++}
++
+ // NewModelWithGeoIP returns a Model wired to enrich every parsed entry with
+ // the given GeoIP enricher before it reaches the analysis engine. Pass nil
+ // to disable GeoIP (equivalent to NewModel).
+-func NewModelWithGeoIP(linesCh chan string, g *enrich.GeoIP) Model {
++func NewModelWithGeoIP(linesCh chan types.SourcedLine, g *enrich.GeoIP) Model {
+ 	return NewModelWithGeoIPAndPatterns(linesCh, g, nil)
+ }
+ 
+-func NewModelWithGeoIPAndPatterns(linesCh chan string, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
++func NewModelWithGeoIPAndPatterns(linesCh chan types.SourcedLine, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
+ 	det := analysis.NewDetectorWithPatterns(custom)
+ 	eng := analysis.New(types.Filters{})
+ 	eng.SetDetector(det)
+@@ -114,13 +131,13 @@ func (m Model) Init() tea.Cmd {
+ 	)
+ }
+ 
+-func waitForLines(ch chan string) tea.Cmd {
++func waitForLines(ch chan types.SourcedLine) tea.Cmd {
+ 	return func() tea.Msg {
+ 		line, ok := <-ch
+ 		if !ok {
+ 			return StreamEndMsg{}
+ 		}
+-		return LineMsg(line)
++		return LineMsg{Source: line.Source, Text: line.Text}
+ 	}
+ }
+ 
+@@ -183,11 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 		}
+ 
+ 	case LineMsg:
+-		line := string(msg)
+-		entry, err := parser.Parse(line)
++		entry, err := parser.Parse(msg.Text)
+ 		if err == nil && entry != nil {
+ 			switch e := entry.(type) {
+ 			case *types.LogEntry:
++				e.Source = msg.Source
+ 				if m.geoip != nil && e.RemoteIP != "" {
+ 					if info, lerr := m.geoip.Lookup(e.RemoteIP); lerr == nil {
+ 						e.Geo = info
+@@ -199,6 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 				}
+ 				m.recentLogs = append(m.recentLogs, e)
+ 			case *types.OperationalEntry:
++				e.Source = msg.Source
+ 				if m.opEngine != nil {
+ 					m.opEngine.Process(e)
+ 				}
+@@ -460,6 +478,15 @@ func (m Model) renderSummary(b *strings.Builder) {
+ 	fmt.Fprintf(b, "    Max: %s\n", output.FormatDuration(s.MaxDuration))
+ 	fmt.Fprintf(b, "    P50: %s\n", output.FormatDuration(s.Percentile50))
+ 	fmt.Fprintf(b, "    P95: %s\n", output.FormatDuration(s.Percentile95))
++
++	// Multi-source sessions: show the deterministic Top Sources ranking
++	// (count desc, name asc), mirroring the report breakdown.
++	if m.multiSource && len(s.SourceCounts) > 0 {
++		fmt.Fprintf(b, "\n  %s:\n", styleLabel.Render("Top Sources"))
++		for i, item := range analysis.TopN(s.SourceCounts, 8) {
++			fmt.Fprintf(b, "    %d. %-40s %d\n", i+1, truncate(item.Key, 38), item.Count)
++		}
++	}
+ }
+ 
+ func (m Model) renderRealtime(b *strings.Builder) {
+@@ -472,6 +499,10 @@ func (m Model) renderRealtime(b *strings.Builder) {
+ 		if e == nil {
+ 			continue
+ 		}
++		sourceStr := ""
++		if m.multiSource {
++			sourceStr = styleTailDim.Render("[" + truncate(e.Source, 24) + "] ")
++		}
+ 		timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
+ 		statusStr := tuiFormatStatus(e.Status)
+ 		methodStr := lipgloss.NewStyle().Bold(true).Render(e.Method)
+@@ -487,8 +518,8 @@ func (m Model) renderRealtime(b *strings.Builder) {
+ 			uaInfo = fmt.Sprintf(" [%s/%s]", e.OS, e.Browser)
+ 		}
+ 
+-		fmt.Fprintf(b, "  %s  %s  %s %s  (%s, %s) - %s%s\n",
+-			timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStr, uaInfo)
++		fmt.Fprintf(b, "  %s%s  %s  %s %s  (%s, %s) - %s%s\n",
++			sourceStr, timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStr, uaInfo)
+ 	}
+ }
+ 
+@@ -634,6 +665,10 @@ func (m Model) renderOperational(b *strings.Builder) {
+ 			start = len(m.recentOps) - 15
+ 		}
+ 		for _, e := range m.recentOps[start:] {
++			sourceStr := ""
++			if m.multiSource && e.Source != "" {
++				sourceStr = styleTailDim.Render("[" + truncate(e.Source, 24) + "] ")
++			}
+ 			timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
+ 			var lvlStr string
+ 			switch e.Level {
+@@ -648,7 +683,7 @@ func (m Model) renderOperational(b *strings.Builder) {
+ 			if e.Logger != "" {
+ 				loggerStr = styleInfo.Render("[" + e.Logger + "]")
+ 			}
+-			fmt.Fprintf(b, "  %s  %s  %s  %s\n", timeStr, lvlStr, loggerStr, e.Msg)
++			fmt.Fprintf(b, "  %s%s  %s  %s  %s\n", sourceStr, timeStr, lvlStr, loggerStr, e.Msg)
+ 		}
+ 	}
+ }
+diff --git a/pkg/tui/dashboard_test.go b/pkg/tui/dashboard_test.go
+index afb1db2..d95a722 100644
+--- a/pkg/tui/dashboard_test.go
++++ b/pkg/tui/dashboard_test.go
+@@ -17,7 +17,7 @@ import (
+ const sampleCaddyLine = `{"level":"info","ts":1700000000.0,"logger":"http.log.access.log0","msg":"handled request","request":{"remote_ip":"192.0.2.10","remote_port":"50000","proto":"HTTP/1.1","method":"GET","host":"example.com","uri":"/search?q=test","headers":{"User-Agent":["curl/8.0"]}},"bytes_read":0,"user_id":"","duration":0.012,"size":2048,"status":200,"resp_headers":{"Content-Type":["text/html"]}}`
+ 
+ func TestNewModelDefaults(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	if m.engine == nil {
+ 		t.Fatal("engine must be set")
+ 	}
+@@ -45,7 +45,7 @@ func TestTailPathStyleUsesTerminalForeground(t *testing.T) {
+ }
+ 
+ func TestUpdateWindowSizeMsgMarksReadyAndInitTables(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+ 	um := updated.(Model)
+ 	if !um.ready {
+@@ -64,11 +64,11 @@ func TestUpdateWindowSizeMsgMarksReadyAndInitTables(t *testing.T) {
+ }
+ 
+ func TestUpdateLineMsgParsesAndAppends(t *testing.T) {
+-	ch := make(chan string, 1)
++	ch := make(chan types.SourcedLine, 1)
+ 	m := NewModel(ch)
+ 	m.ready = true
+ 
+-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
++	updated, _ := m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
+ 	um := updated.(Model)
+ 	if len(um.recentLogs) != 1 {
+ 		t.Fatalf("recentLogs len = %d, want 1", len(um.recentLogs))
+@@ -79,16 +79,19 @@ func TestUpdateLineMsgParsesAndAppends(t *testing.T) {
+ 	if um.recentLogs[0].Method != "GET" {
+ 		t.Errorf("entry Method = %q, want GET", um.recentLogs[0].Method)
+ 	}
++	if um.recentLogs[0].Source != "a.log" {
++		t.Errorf("entry Source = %q, want a.log", um.recentLogs[0].Source)
++	}
+ 	if um.engine.Count() != 1 {
+ 		t.Errorf("engine should have processed 1 entry, got %d", um.engine.Count())
+ 	}
+ }
+ 
+ func TestUpdateLineMsgGarbageIgnored(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 
+-	updated, _ := m.Update(LineMsg("not json at all"))
++	updated, _ := m.Update(LineMsg{Text: "not json at all"})
+ 	um := updated.(Model)
+ 	if len(um.recentLogs) != 0 {
+ 		t.Errorf("garbage line must not append, got %d logs", len(um.recentLogs))
+@@ -96,11 +99,11 @@ func TestUpdateLineMsgGarbageIgnored(t *testing.T) {
+ }
+ 
+ func TestUpdateTickMsgFinalizesStatsAndRPS(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 
+ 	// Feed a line so the engine has data.
+-	um, _ := m.Update(LineMsg(sampleCaddyLine))
++	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
+ 	m = um.(Model)
+ 
+ 	updated, cmd := m.Update(TickMsg(time.Now()))
+@@ -135,7 +138,7 @@ func TestUpdateKeyMessagesSwitchView(t *testing.T) {
+ 	}
+ 	for _, c := range cases {
+ 		t.Run(c.key, func(t *testing.T) {
+-			m := NewModel(make(chan string, 1))
++			m := NewModel(make(chan types.SourcedLine, 1))
+ 			m.ready = true
+ 			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(c.key)})
+ 			um := updated.(Model)
+@@ -166,7 +169,7 @@ func TestUpdateNavigationKeysWrapViews(t *testing.T) {
+ 	}
+ 	for _, c := range cases {
+ 		t.Run(c.name, func(t *testing.T) {
+-			m := NewModel(make(chan string, 1))
++			m := NewModel(make(chan types.SourcedLine, 1))
+ 			m.ready = true
+ 			m.current = c.start
+ 			updated, _ := m.Update(tea.KeyMsg{Type: c.key})
+@@ -182,7 +185,7 @@ func TestUpdateNavigationKeysWrapViews(t *testing.T) {
+ }
+ 
+ func TestUpdateQuitKeyReturnsQuitCmd(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	for _, key := range []string{"q", "esc"} {
+ 		t.Run(key, func(t *testing.T) {
+ 			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+@@ -199,7 +202,7 @@ func TestUpdateQuitKeyReturnsQuitCmd(t *testing.T) {
+ }
+ 
+ func TestViewLoadingWhenNotReady(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	out := m.View()
+ 	if !strings.Contains(out, "loading") {
+ 		t.Errorf("View before ready should mention loading, got %q", out)
+@@ -207,14 +210,14 @@ func TestViewLoadingWhenNotReady(t *testing.T) {
+ }
+ 
+ func TestViewRendersWhenReady(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 	m.width = 120
+ 	m.height = 40
+ 	m = m.initTables()
+ 
+ 	// Feed data and a tick so stats populate.
+-	um, _ := m.Update(LineMsg(sampleCaddyLine))
++	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
+ 	m = um.(Model)
+ 	um, _ = m.Update(TickMsg(time.Now()))
+ 	m = um.(Model)
+@@ -229,7 +232,7 @@ func TestViewRendersWhenReady(t *testing.T) {
+ }
+ 
+ func TestRefreshTablesNoOpWhenNotReady(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	got := m.refreshTables()
+ 	// Must return the model unchanged (no panic, no mutation to stats).
+ 	if got.ready {
+@@ -238,7 +241,7 @@ func TestRefreshTablesNoOpWhenNotReady(t *testing.T) {
+ }
+ 
+ func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 	m.width = 120
+ 	m.height = 40
+@@ -247,7 +250,7 @@ func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
+ 	// Feed data + tick so stats exist. The tick handler already calls
+ 	// refreshTables once, so the table is populated; calling it again must keep
+ 	// the rows (idempotent) and not clear them.
+-	um, _ := m.Update(LineMsg(sampleCaddyLine))
++	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
+ 	m = um.(Model)
+ 	um, _ = m.Update(TickMsg(time.Now()))
+ 	m = um.(Model)
+@@ -265,17 +268,17 @@ func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
+ }
+ 
+ func TestRefreshTablesRanksDomainsByRequestCount(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 	m.width = 120
+ 	m.height = 40
+ 	m = m.initTables()
+ 
+-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
++	updated, _ := m.Update(LineMsg{Text: sampleCaddyLine})
+ 	m = updated.(Model)
+-	updated, _ = m.Update(LineMsg(strings.Replace(sampleCaddyLine, "example.com", "api.example.com", 1)))
++	updated, _ = m.Update(LineMsg{Text: strings.Replace(sampleCaddyLine, "example.com", "api.example.com", 1)})
+ 	m = updated.(Model)
+-	updated, _ = m.Update(LineMsg(sampleCaddyLine))
++	updated, _ = m.Update(LineMsg{Text: sampleCaddyLine})
+ 	m = updated.(Model)
+ 	updated, _ = m.Update(TickMsg(time.Now()))
+ 	m = updated.(Model)
+@@ -311,7 +314,7 @@ func TestTruncate(t *testing.T) {
+ }
+ 
+ func TestInitReturnsBatchedCmds(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	cmd := m.Init()
+ 	if cmd == nil {
+ 		t.Fatal("Init must return a batched cmd (waitForLines + tickEvery)")
+@@ -328,7 +331,7 @@ func TestModelSatisfiesTeaModel(t *testing.T) {
+ // TestDetectorSharedInTUI verifies the TUI's detector benefits from the cached
+ // patterns (regression for the regex-caching fix).
+ func TestDetectorSharedInTUI(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	if m.detector == nil {
+ 		t.Fatal("detector nil")
+ 	}
+@@ -345,12 +348,12 @@ func TestDetectorSharedInTUI(t *testing.T) {
+ // the model so the LineMsg handler can use it.
+ func TestNewModelWithGeoIPStoresEnricher(t *testing.T) {
+ 	g := &enrich.GeoIP{}
+-	m := NewModelWithGeoIP(make(chan string, 1), g)
++	m := NewModelWithGeoIP(make(chan types.SourcedLine, 1), g)
+ 	if m.geoip != g {
+ 		t.Fatal("geoip enricher must be stored on the model")
+ 	}
+ 	// NewModel must leave geoip nil for backward compatibility.
+-	if NewModel(make(chan string, 1)).geoip != nil {
++	if NewModel(make(chan types.SourcedLine, 1)).geoip != nil {
+ 		t.Error("NewModel must leave geoip nil")
+ 	}
+ }
+@@ -364,10 +367,10 @@ func TestUpdateLineMsgEnrichesGeo(t *testing.T) {
+ 	// remains zero and the engine records no country counts. This guards
+ 	// against regressions where the enricher call is removed from the
+ 	// LineMsg handler.
+-	m := NewModelWithGeoIP(make(chan string, 1), nil)
++	m := NewModelWithGeoIP(make(chan types.SourcedLine, 1), nil)
+ 	m.ready = true
+ 
+-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
++	updated, _ := m.Update(LineMsg{Text: sampleCaddyLine})
+ 	um := updated.(Model)
+ 	if um.stats != nil && len(um.stats.CountryCounts) != 0 {
+ 		t.Errorf("country counts must be empty when geoip is nil, got %d", len(um.stats.CountryCounts))
+@@ -380,10 +383,64 @@ func TestUpdateLineMsgEnrichesGeo(t *testing.T) {
+ 	}
+ }
+ 
+-// TestViewGeoRendersDisabledHint verifies the Geo tab degrades gracefully when
+-// no GeoIP enricher is configured.
++// TestMultiSourceShowsSourceInViews verifies that a multi-source watch
++// session surfaces the source identity: Top Sources on the summary view and
++// a [source] prefix in the realtime view. Single-source stays compact.
++func TestMultiSourceShowsSourceInViews(t *testing.T) {
++	m := NewModel(make(chan types.SourcedLine, 4))
++	m.SetMultiSource(true)
++	m.ready = true
++	m.width = 120
++	m.height = 40
++	m = m.initTables()
++
++	m2, _ := m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
++	m = m2.(Model)
++	m2, _ = m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
++	m = m2.(Model)
++	m2, _ = m.Update(TickMsg(time.Now()))
++	m = m2.(Model)
++
++	summary := m.renderString(viewSummary)
++	if !strings.Contains(summary, "Top Sources") || !strings.Contains(summary, "a.log") {
++		t.Errorf("summary must list Top Sources in multi-source mode, got:\n%s", summary)
++	}
++
++	m.current = viewRealtime
++	realtime := m.renderString(viewRealtime)
++	if !strings.Contains(realtime, "[a.log]") {
++		t.Errorf("realtime view must prefix lines with [source], got:\n%s", realtime)
++	}
++
++	// Single-source keeps the compact layout: no Top Sources block.
++	single := NewModel(make(chan types.SourcedLine, 1))
++	single.ready = true
++	single.width = 120
++	single.height = 40
++	single = single.initTables()
++	s2, _ := single.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
++	single = s2.(Model)
++	s2, _ = single.Update(TickMsg(time.Now()))
++	single = s2.(Model)
++	if strings.Contains(single.renderString(viewSummary), "Top Sources") {
++		t.Error("single-source summary must not render the Top Sources block")
++	}
++}
++
++// renderString renders one view of the model.
++func (m Model) renderString(v view) string {
++	var b strings.Builder
++	switch v {
++	case viewSummary:
++		m.renderSummary(&b)
++	case viewRealtime:
++		m.renderRealtime(&b)
++	}
++	return b.String()
++}
++
+ func TestViewGeoRendersDisabledHint(t *testing.T) {
+-	m := NewModel(make(chan string, 1))
++	m := NewModel(make(chan types.SourcedLine, 1))
+ 	m.ready = true
+ 	m.width = 120
+ 	m.height = 40
+diff --git a/pkg/types/source_test.go b/pkg/types/source_test.go
+new file mode 100644
+index 0000000..7440f3f
+--- /dev/null
++++ b/pkg/types/source_test.go
+@@ -0,0 +1,38 @@
++package types
++
++import "testing"
++
++func TestLogSourceCanonical(t *testing.T) {
++	tests := []struct {
++		name string
++		src  LogSource
++		want string
++	}{
++		{"stdin", LogSource{Type: SourceStdin}, "stdin"},
++		{"file cleaned", LogSource{Type: SourceFile, Path: "./dir/../access.log"}, "access.log"},
++		{"docker", LogSource{Type: SourceDocker, Path: "caddy"}, "docker://caddy"},
++		{"k8s explicit ns", LogSource{Type: SourceK8s, Namespace: "kube-system", Path: "pod-x"}, "k8s://kube-system/pod-x"},
++		{"k8s default ns", LogSource{Type: SourceK8s, Path: "pod-x"}, "k8s://default/pod-x"},
++		{"journalctl", LogSource{Type: SourceJournalctl, Path: "caddy.service"}, "journalctl://caddy.service"},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := tt.src.Canonical(); got != tt.want {
++				t.Errorf("Canonical() = %q, want %q", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestCanonicalStableAcrossEquivalentSpellings(t *testing.T) {
++	a := LogSource{Type: SourceFile, Path: "a.log"}
++	b := LogSource{Type: SourceFile, Path: "./a.log"}
++	if a.Canonical() != b.Canonical() {
++		t.Errorf("equivalent file spellings produced different keys: %q vs %q", a.Canonical(), b.Canonical())
++	}
++	k1 := LogSource{Type: SourceK8s, Path: "p"}
++	k2 := LogSource{Type: SourceK8s, Namespace: DefaultK8sNamespace, Path: "p"}
++	if k1.Canonical() != k2.Canonical() {
++		t.Errorf("default and explicit default namespace produced different keys: %q vs %q", k1.Canonical(), k2.Canonical())
++	}
++}
+diff --git a/pkg/types/types.go b/pkg/types/types.go
+index af6ecd7..c35d07f 100644
+--- a/pkg/types/types.go
++++ b/pkg/types/types.go
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"math"
+ 	"net"
++	"path/filepath"
+ 	"strings"
+ 	"time"
+ )
+@@ -127,6 +128,11 @@ type LogEntry struct {
+ 	RealIP        string
+ 	Authorization string
+ 	Geo           GeoInfo
++	// Source is the canonical identity of the logical input the line was
++	// read from (file path, "stdin", docker://..., k8s://ns/pod,
++	// journalctl://...). Populated by the pipeline after parsing; empty
++	// for entries constructed directly.
++	Source string
+ }
+ 
+ // Entry is a marker interface implemented by all parsed log entry types.
+@@ -153,6 +159,9 @@ type OperationalEntry struct {
+ 	// (upstream, error, config_file, etc.). Values are the raw JSON tokens
+ 	// so callers can decode them lazily.
+ 	Extra map[string]json.RawMessage
++	// Source is the canonical identity of the logical input the line was
++	// read from. Populated by the pipeline after parsing.
++	Source string
+ }
+ 
+ func (*OperationalEntry) entry() {}
+@@ -238,6 +247,55 @@ type LogSource struct {
+ 	Namespace string
+ }
+ 
++// DefaultK8sNamespace is the canonical namespace used for k8s sources
++// specified without an explicit namespace (flags or k8s://ns/pod URL).
++const DefaultK8sNamespace = "default"
++
++// Canonical returns the stable, display-order-independent identity of the
++// logical input. A file glob is expanded by the caller into one LogSource
++// per matched file, so a file source's canonical identity is the cleaned
++// concrete path. Equal canonical identities (e.g. "a.log" and "./a.log",
++// a repeated argument) merge into one statistics key.
++func (s LogSource) Canonical() string {
++	switch s.Type {
++	case SourceStdin:
++		return "stdin"
++	case SourceDocker:
++		return "docker://" + s.Path
++	case SourceK8s:
++		ns := s.Namespace
++		if ns == "" {
++			ns = DefaultK8sNamespace
++		}
++		return "k8s://" + ns + "/" + s.Path
++	case SourceJournalctl:
++		return "journalctl://" + s.Path
++	default:
++		return filepath.Clean(s.Path)
++	}
++}
++
++// SourcedLine is a raw log line tagged with the canonical identity of the
++// input that produced it. It travels unchanged through sequential reads,
++// follow fan-in, cancellation, and ordered parallel parsing so HTTP
++// entries, operational entries, and parse failures never lose or swap
++// their source label after fan-in.
++type SourcedLine struct {
++	Source string
++	Text   string
++}
++
++// SourceStat is the per-source reconciliation row shared by every report
++// format: requests accepted by the HTTP engine, operational events
++// accepted by the operational engine, and parse failures attributed to
++// the source before either engine saw the line.
++type SourceStat struct {
++	Source            string `json:"source"`
++	Requests          int64  `json:"requests"`
++	OperationalEvents int64  `json:"operational_events"`
++	ParseErrors       int64  `json:"parse_errors"`
++}
++
+ type Filters struct {
+ 	From       time.Time
+ 	To         time.Time
+@@ -295,6 +353,7 @@ const (
+ 	TopCountry    TopField = "country"
+ 	TopASN        TopField = "asn"
+ 	TopCity       TopField = "city"
++	TopSource     TopField = "source"
+ )
+ 
+ type GeoLocation struct {
+@@ -329,6 +388,14 @@ type Stats struct {
+ 	// names (e.g. "Italy") for display. Populated by the GeoIP enricher
+ 	// alongside CountryCounts.
+ 	CountryNames map[string]string
++	// SourceCounts tracks accepted HTTP requests per canonical source
++	// identity. Unlike the high-cardinality traffic counters it is not
++	// bounded by MaxCardinality (the number of inputs is small) so the
++	// per-source breakdown always reconciles with TotalRequests.
++	SourceCounts map[string]int64
++	// SourceParseErrors tracks unparseable lines per canonical source
++	// identity; the sum over all keys mirrors ParseErrors.
++	SourceParseErrors map[string]int64
+ 	// PathErrorCounts tracks 5xx responses per path. Used by the diff
+ 	// engine to surface NEW error paths (paths that errored in target but
+ 	// were absent or healthy in baseline) rather than any new path.
+@@ -432,6 +499,8 @@ func NewStats() *Stats {
+ 		CountryNames:         make(map[string]string),
+ 		CityCounts:           make(map[string]int64),
+ 		CityLocations:        make(map[string]GeoLocation),
++		SourceCounts:         make(map[string]int64),
++		SourceParseErrors:    make(map[string]int64),
+ 		MinDuration:          1<<63 - 1,
+ 	}
+ }
+@@ -463,6 +532,19 @@ func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
+ 	m[key] = n
+ }
+ 
++// RecordSourceParseError attributes an unparseable line to a source. The
++// empty source (entries constructed outside the tagged pipeline) is
++// ignored so single-source/default behavior stays unchanged.
++func (s *Stats) RecordSourceParseError(source string) {
++	if source == "" {
++		return
++	}
++	if s.SourceParseErrors == nil {
++		s.SourceParseErrors = make(map[string]int64)
++	}
++	s.SourceParseErrors[source]++
++}
++
+ func (s *Stats) AddDuration(d float64) {
+ 	s.durHist.add(d)
+ }
+@@ -481,6 +563,9 @@ type OperationalStats struct {
+ 	LevelCounts  map[string]int64 // info, warn, error, debug
+ 	LoggerCounts map[string]int64 // "tls", "http", "admin", ""
+ 	MsgCounts    map[string]int64
++	// SourceCounts tracks accepted operational events per canonical
++	// source identity (not cardinality-bounded; inputs are few).
++	SourceCounts map[string]int64
+ 	StartTime    time.Time
+ 	EndTime      time.Time
+ 	Errors       int64 // count of level == "error"
+@@ -492,5 +577,6 @@ func NewOperationalStats() *OperationalStats {
+ 		LevelCounts:  make(map[string]int64),
+ 		LoggerCounts: make(map[string]int64),
+ 		MsgCounts:    make(map[string]int64),
++		SourceCounts: make(map[string]int64),
+ 	}
+ }

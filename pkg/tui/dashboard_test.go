@@ -17,7 +17,7 @@ import (
 const sampleCaddyLine = `{"level":"info","ts":1700000000.0,"logger":"http.log.access.log0","msg":"handled request","request":{"remote_ip":"192.0.2.10","remote_port":"50000","proto":"HTTP/1.1","method":"GET","host":"example.com","uri":"/search?q=test","headers":{"User-Agent":["curl/8.0"]}},"bytes_read":0,"user_id":"","duration":0.012,"size":2048,"status":200,"resp_headers":{"Content-Type":["text/html"]}}`
 
 func TestNewModelDefaults(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	if m.engine == nil {
 		t.Fatal("engine must be set")
 	}
@@ -45,7 +45,7 @@ func TestTailPathStyleUsesTerminalForeground(t *testing.T) {
 }
 
 func TestUpdateWindowSizeMsgMarksReadyAndInitTables(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	um := updated.(Model)
 	if !um.ready {
@@ -64,11 +64,11 @@ func TestUpdateWindowSizeMsgMarksReadyAndInitTables(t *testing.T) {
 }
 
 func TestUpdateLineMsgParsesAndAppends(t *testing.T) {
-	ch := make(chan string, 1)
+	ch := make(chan types.SourcedLine, 1)
 	m := NewModel(ch)
 	m.ready = true
 
-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
+	updated, _ := m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
 	um := updated.(Model)
 	if len(um.recentLogs) != 1 {
 		t.Fatalf("recentLogs len = %d, want 1", len(um.recentLogs))
@@ -79,16 +79,19 @@ func TestUpdateLineMsgParsesAndAppends(t *testing.T) {
 	if um.recentLogs[0].Method != "GET" {
 		t.Errorf("entry Method = %q, want GET", um.recentLogs[0].Method)
 	}
+	if um.recentLogs[0].Source != "a.log" {
+		t.Errorf("entry Source = %q, want a.log", um.recentLogs[0].Source)
+	}
 	if um.engine.Count() != 1 {
 		t.Errorf("engine should have processed 1 entry, got %d", um.engine.Count())
 	}
 }
 
 func TestUpdateLineMsgGarbageIgnored(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 
-	updated, _ := m.Update(LineMsg("not json at all"))
+	updated, _ := m.Update(LineMsg{Text: "not json at all"})
 	um := updated.(Model)
 	if len(um.recentLogs) != 0 {
 		t.Errorf("garbage line must not append, got %d logs", len(um.recentLogs))
@@ -96,11 +99,11 @@ func TestUpdateLineMsgGarbageIgnored(t *testing.T) {
 }
 
 func TestUpdateTickMsgFinalizesStatsAndRPS(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 
 	// Feed a line so the engine has data.
-	um, _ := m.Update(LineMsg(sampleCaddyLine))
+	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
 	m = um.(Model)
 
 	updated, cmd := m.Update(TickMsg(time.Now()))
@@ -135,7 +138,7 @@ func TestUpdateKeyMessagesSwitchView(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
-			m := NewModel(make(chan string, 1))
+			m := NewModel(make(chan types.SourcedLine, 1))
 			m.ready = true
 			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(c.key)})
 			um := updated.(Model)
@@ -166,7 +169,7 @@ func TestUpdateNavigationKeysWrapViews(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			m := NewModel(make(chan string, 1))
+			m := NewModel(make(chan types.SourcedLine, 1))
 			m.ready = true
 			m.current = c.start
 			updated, _ := m.Update(tea.KeyMsg{Type: c.key})
@@ -182,7 +185,7 @@ func TestUpdateNavigationKeysWrapViews(t *testing.T) {
 }
 
 func TestUpdateQuitKeyReturnsQuitCmd(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	for _, key := range []string{"q", "esc"} {
 		t.Run(key, func(t *testing.T) {
 			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
@@ -199,7 +202,7 @@ func TestUpdateQuitKeyReturnsQuitCmd(t *testing.T) {
 }
 
 func TestViewLoadingWhenNotReady(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	out := m.View()
 	if !strings.Contains(out, "loading") {
 		t.Errorf("View before ready should mention loading, got %q", out)
@@ -207,14 +210,14 @@ func TestViewLoadingWhenNotReady(t *testing.T) {
 }
 
 func TestViewRendersWhenReady(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 	m.width = 120
 	m.height = 40
 	m = m.initTables()
 
 	// Feed data and a tick so stats populate.
-	um, _ := m.Update(LineMsg(sampleCaddyLine))
+	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
 	m = um.(Model)
 	um, _ = m.Update(TickMsg(time.Now()))
 	m = um.(Model)
@@ -229,7 +232,7 @@ func TestViewRendersWhenReady(t *testing.T) {
 }
 
 func TestRefreshTablesNoOpWhenNotReady(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	got := m.refreshTables()
 	// Must return the model unchanged (no panic, no mutation to stats).
 	if got.ready {
@@ -238,7 +241,7 @@ func TestRefreshTablesNoOpWhenNotReady(t *testing.T) {
 }
 
 func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 	m.width = 120
 	m.height = 40
@@ -247,7 +250,7 @@ func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
 	// Feed data + tick so stats exist. The tick handler already calls
 	// refreshTables once, so the table is populated; calling it again must keep
 	// the rows (idempotent) and not clear them.
-	um, _ := m.Update(LineMsg(sampleCaddyLine))
+	um, _ := m.Update(LineMsg{Text: sampleCaddyLine})
 	m = um.(Model)
 	um, _ = m.Update(TickMsg(time.Now()))
 	m = um.(Model)
@@ -265,17 +268,17 @@ func TestRefreshTablesPopulatesWhenReady(t *testing.T) {
 }
 
 func TestRefreshTablesRanksDomainsByRequestCount(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 	m.width = 120
 	m.height = 40
 	m = m.initTables()
 
-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
+	updated, _ := m.Update(LineMsg{Text: sampleCaddyLine})
 	m = updated.(Model)
-	updated, _ = m.Update(LineMsg(strings.Replace(sampleCaddyLine, "example.com", "api.example.com", 1)))
+	updated, _ = m.Update(LineMsg{Text: strings.Replace(sampleCaddyLine, "example.com", "api.example.com", 1)})
 	m = updated.(Model)
-	updated, _ = m.Update(LineMsg(sampleCaddyLine))
+	updated, _ = m.Update(LineMsg{Text: sampleCaddyLine})
 	m = updated.(Model)
 	updated, _ = m.Update(TickMsg(time.Now()))
 	m = updated.(Model)
@@ -311,7 +314,7 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestInitReturnsBatchedCmds(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	cmd := m.Init()
 	if cmd == nil {
 		t.Fatal("Init must return a batched cmd (waitForLines + tickEvery)")
@@ -328,7 +331,7 @@ func TestModelSatisfiesTeaModel(t *testing.T) {
 // TestDetectorSharedInTUI verifies the TUI's detector benefits from the cached
 // patterns (regression for the regex-caching fix).
 func TestDetectorSharedInTUI(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	if m.detector == nil {
 		t.Fatal("detector nil")
 	}
@@ -345,12 +348,12 @@ func TestDetectorSharedInTUI(t *testing.T) {
 // the model so the LineMsg handler can use it.
 func TestNewModelWithGeoIPStoresEnricher(t *testing.T) {
 	g := &enrich.GeoIP{}
-	m := NewModelWithGeoIP(make(chan string, 1), g)
+	m := NewModelWithGeoIP(make(chan types.SourcedLine, 1), g)
 	if m.geoip != g {
 		t.Fatal("geoip enricher must be stored on the model")
 	}
 	// NewModel must leave geoip nil for backward compatibility.
-	if NewModel(make(chan string, 1)).geoip != nil {
+	if NewModel(make(chan types.SourcedLine, 1)).geoip != nil {
 		t.Error("NewModel must leave geoip nil")
 	}
 }
@@ -364,10 +367,10 @@ func TestUpdateLineMsgEnrichesGeo(t *testing.T) {
 	// remains zero and the engine records no country counts. This guards
 	// against regressions where the enricher call is removed from the
 	// LineMsg handler.
-	m := NewModelWithGeoIP(make(chan string, 1), nil)
+	m := NewModelWithGeoIP(make(chan types.SourcedLine, 1), nil)
 	m.ready = true
 
-	updated, _ := m.Update(LineMsg(sampleCaddyLine))
+	updated, _ := m.Update(LineMsg{Text: sampleCaddyLine})
 	um := updated.(Model)
 	if um.stats != nil && len(um.stats.CountryCounts) != 0 {
 		t.Errorf("country counts must be empty when geoip is nil, got %d", len(um.stats.CountryCounts))
@@ -380,10 +383,64 @@ func TestUpdateLineMsgEnrichesGeo(t *testing.T) {
 	}
 }
 
-// TestViewGeoRendersDisabledHint verifies the Geo tab degrades gracefully when
-// no GeoIP enricher is configured.
+// TestMultiSourceShowsSourceInViews verifies that a multi-source watch
+// session surfaces the source identity: Top Sources on the summary view and
+// a [source] prefix in the realtime view. Single-source stays compact.
+func TestMultiSourceShowsSourceInViews(t *testing.T) {
+	m := NewModel(make(chan types.SourcedLine, 4))
+	m.SetMultiSource(true)
+	m.ready = true
+	m.width = 120
+	m.height = 40
+	m = m.initTables()
+
+	m2, _ := m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
+	m = m2.(Model)
+	m2, _ = m.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
+	m = m2.(Model)
+	m2, _ = m.Update(TickMsg(time.Now()))
+	m = m2.(Model)
+
+	summary := m.renderString(viewSummary)
+	if !strings.Contains(summary, "Top Sources") || !strings.Contains(summary, "a.log") {
+		t.Errorf("summary must list Top Sources in multi-source mode, got:\n%s", summary)
+	}
+
+	m.current = viewRealtime
+	realtime := m.renderString(viewRealtime)
+	if !strings.Contains(realtime, "[a.log]") {
+		t.Errorf("realtime view must prefix lines with [source], got:\n%s", realtime)
+	}
+
+	// Single-source keeps the compact layout: no Top Sources block.
+	single := NewModel(make(chan types.SourcedLine, 1))
+	single.ready = true
+	single.width = 120
+	single.height = 40
+	single = single.initTables()
+	s2, _ := single.Update(LineMsg{Source: "a.log", Text: sampleCaddyLine})
+	single = s2.(Model)
+	s2, _ = single.Update(TickMsg(time.Now()))
+	single = s2.(Model)
+	if strings.Contains(single.renderString(viewSummary), "Top Sources") {
+		t.Error("single-source summary must not render the Top Sources block")
+	}
+}
+
+// renderString renders one view of the model.
+func (m Model) renderString(v view) string {
+	var b strings.Builder
+	switch v {
+	case viewSummary:
+		m.renderSummary(&b)
+	case viewRealtime:
+		m.renderRealtime(&b)
+	}
+	return b.String()
+}
+
 func TestViewGeoRendersDisabledHint(t *testing.T) {
-	m := NewModel(make(chan string, 1))
+	m := NewModel(make(chan types.SourcedLine, 1))
 	m.ready = true
 	m.width = 120
 	m.height = 40

@@ -1,0 +1,25 @@
+---
+rubrics:
+- id: 1
+  type: f2p
+  text: 文件、每个 glob 实际匹配文件、stdin、Docker 容器、Kubernetes namespace/pod 和 journal unit
+    都生成稳定规范来源身份；重复指定的同一规范来源聚合为同一键。
+- id: 2
+  type: f2p
+  text: 来源随日志行通过普通 reader、follow fan-in、取消和多 worker 有序解析，HTTP 与 operational entry
+    及解析错误在并发和缓冲情况下都保持原来源且每个来源内部顺序不被破坏。
+- id: 3
+  type: f2p
+  text: HTTP 请求、operational 事件和解析错误均按来源聚合，所有来源小计分别与已接纳的全局总数一致，过滤掉的条目不会误计到来源统计。
+- id: 4
+  type: f2p
+  text: top source 与表格、JSON、CSV、HTML、Elasticsearch/OpenSearch 和 Loki 报告使用同一来源键、计数和确定排序，不同输出不会把逻辑来源拆分或错误合并。
+- id: 5
+  type: f2p
+  text: tail 和 watch 在多源输入时为 HTTP 与 operational 行显示不歧义的来源；单源输入不增加冗余前缀，TUI 窗口更新或重置后新行仍保持正确身份。
+- id: 6
+  type: f2p
+  text: 来源打开失败、单源提前结束和带 malformed JSON 的行产生来源明确的诊断；各模式保持既有继续或终止政策，继续处理时其他来源的已排队内容不被改标或丢失。
+- id: 7
+  type: p2p
+  text: 现有单源文件、stdin、Docker、Kubernetes 和 journalctl 的解析、过滤、检测、全局统计与默认输出保持兼容，多源并发处理不存在数据竞争或不确定重排。

@@ -158,12 +158,13 @@ func processLogFile(ctx context.Context, path string) (*analysis.Engine, error) 
 	}
 	bar := progress.New(os.Stderr, 0, "Parsing "+filepath.Base(path))
 	for line := range lines {
-		entry, err := parser.Parse(line)
+		entry, err := parser.Parse(line.Text)
 		if err != nil || entry == nil {
 			bar.Add(1)
 			continue
 		}
 		if le, ok := entry.(*types.LogEntry); ok {
+			le.Source = line.Source
 			applyForwarded(le, filters)
 			enrichGeoIP(le, geoip)
 			engine.Process(le)

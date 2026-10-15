@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lenny-ts/caddy-analyzer/pkg/enrich"
 	"github.com/lenny-ts/caddy-analyzer/pkg/types"
 )
 
@@ -234,5 +235,21 @@ func TestPrepareEntryEnrichesBeforeMatchForGeoFilters(t *testing.T) {
 	}
 	if len(geo2.hits) != 0 {
 		t.Fatalf("lookups = %v, want none for rejected rows without geo filters", geo2.hits)
+	}
+}
+
+// TestPrepareEntryTypedNilGeoIP is the regression test for follow mode
+// crashing when no GeoIP mmdb is available: newGeoIPEnricher returns a typed
+// nil *enrich.GeoIP, which inside the geoLookuper interface must behave like
+// "no enricher" instead of dispatching Lookup to a nil receiver.
+func TestPrepareEntryTypedNilGeoIP(t *testing.T) {
+	var geo *enrich.GeoIP
+	entry := &types.LogEntry{Method: "GET", Status: 200, URI: "/", RemoteIP: "1.1.1.1"}
+	if !prepareEntry(entry, types.Filters{}, geo) {
+		t.Fatal("entry must be accepted with a nil GeoIP enricher")
+	}
+	// Must not panic and must leave Geo unresolved.
+	if entry.Geo.CountryCode != "" {
+		t.Fatalf("unexpected geo enrichment: %+v", entry.Geo)
 	}
 }

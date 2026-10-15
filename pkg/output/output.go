@@ -125,6 +125,18 @@ func (r *Report) SetOperationalStats(s *types.OperationalStats) {
 	r.opStats = s
 }
 
+// sourceRows builds the deterministic per-source reconciliation rows shared
+// by every formatter. Callers render the section only when more than one
+// distinct source was observed so single-source output stays unchanged.
+func (r *Report) sourceRows() []types.SourceStat {
+	s := r.engine.Stats()
+	var opCounts map[string]int64
+	if r.opStats != nil {
+		opCounts = r.opStats.SourceCounts
+	}
+	return analysis.SourceStats(s.SourceCounts, opCounts, s.SourceParseErrors)
+}
+
 func (r *Report) activeFilters() []string {
 	var f []string
 	if r.filters.HasFrom {
@@ -520,6 +532,21 @@ func (r *Report) printTable() error {
 		_, _ = fmt.Fprintf(w, "%s\t%d\n\n", renderLabel(styleError, "Parse Errors:"), s.ParseErrors)
 	}
 
+	if rows := r.sourceRows(); len(rows) > 1 {
+		title := "Sources Breakdown"
+		if useColor {
+			title = styleLabel.Render(title)
+		}
+		_, _ = fmt.Fprintf(w, "%s:\n", title)
+		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n",
+			styleDim.Render("Source"), styleDim.Render("Requests"),
+			styleDim.Render("Operational Events"), styleDim.Render("Parse Errors"))
+		for _, row := range rows {
+			_, _ = fmt.Fprintf(w, "  %s\t%d\t%d\t%d\n", stripANSI(row.Source), row.Requests, row.OperationalEvents, row.ParseErrors)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
+
 	if r.top > 0 {
 		if r.sections.Path {
 			title := fmt.Sprintf("Top %d Paths", r.top)
@@ -705,6 +732,19 @@ func (r *Report) printDetectTable(s *types.Stats, total int64, useColor bool, ew
 	}
 	_, _ = fmt.Fprintf(w, "%s\t%d requests\n\n", label, total)
 
+	if rows := r.sourceRows(); len(rows) > 1 {
+		srcLabel := "Sources:"
+		if useColor {
+			srcLabel = styleLabel.Render(srcLabel)
+		}
+		_, _ = fmt.Fprintf(w, "%s\n", srcLabel)
+		for _, row := range rows {
+			_, _ = fmt.Fprintf(w, "  %s\t%d requests, %d operational events, %d parse errors\n",
+				stripANSI(row.Source), row.Requests, row.OperationalEvents, row.ParseErrors)
+		}
+		_, _ = fmt.Fprintln(w)
+	}
+
 	if len(s.SuspiciousIPs) > 0 {
 		alertLabel := fmt.Sprintf("[ALERT] THREAT ALERTS DETECTED (%d suspicious IPs)", len(s.SuspiciousIPs))
 		if useColor {
@@ -823,6 +863,12 @@ func (r *Report) reportData() map[string]interface{} {
 		"parse_errors": s.ParseErrors,
 	}
 
+	// Per-source breakdown only for multi-source sessions, keeping
+	// single-source JSON byte-identical to the previous output.
+	if rows := r.sourceRows(); len(rows) > 1 {
+		data["sources"] = rows
+	}
+
 	if r.detect && len(s.SuspiciousIPs) > 0 {
 		data["suspicious_ips"] = analysis.TopN(s.SuspiciousIPs, 20)
 		data["suspicious_details"] = s.SuspiciousDetails
@@ -913,6 +959,13 @@ func (r *Report) printCSV() error {
 	writePair("duration_p50", fmt.Sprintf("%.6f", s.Percentile50))
 	writePair("duration_p95", fmt.Sprintf("%.6f", s.Percentile95))
 	writePair("duration_p99", fmt.Sprintf("%.6f", s.Percentile99))
+
+	if rows := r.sourceRows(); len(rows) > 1 {
+		writeSection([]string{"sources:source", "requests", "operational_events", "parse_errors"})
+		for _, row := range rows {
+			write([]string{row.Source, fmt.Sprintf("%d", row.Requests), fmt.Sprintf("%d", row.OperationalEvents), fmt.Sprintf("%d", row.ParseErrors)})
+		}
+	}
 
 	if r.detect && len(s.SuspiciousIPs) > 0 {
 		writeSection([]string{"suspicious_ips:ip", "count"})

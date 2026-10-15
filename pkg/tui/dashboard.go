@@ -17,7 +17,14 @@ import (
 )
 
 type TickMsg time.Time
-type LineMsg string
+
+// LineMsg is one raw input line tagged with the canonical source it came
+// from. In single-source sessions Source is rendered nowhere so the
+// compact layout is preserved.
+type LineMsg struct {
+	Source string
+	Text   string
+}
 type StreamEndMsg struct{}
 
 type view int
@@ -35,10 +42,14 @@ const (
 )
 
 type Model struct {
-	engine      *analysis.Engine
-	opEngine    *analysis.OperationalEngine
-	detector    *analysis.Detector
-	linesCh     chan string
+	engine   *analysis.Engine
+	opEngine *analysis.OperationalEngine
+	detector *analysis.Detector
+	linesCh  chan types.SourcedLine
+	// multiSource enables the source column/prefix and the Top Sources
+	// summary block. It is set from cmd when more than one distinct
+	// logical source is being followed.
+	multiSource bool
 	ready       bool
 	width       int
 	height      int
@@ -78,18 +89,24 @@ var (
 	styleTailPath = lipgloss.NewStyle().Bold(true)
 )
 
-func NewModel(linesCh chan string) Model {
+func NewModel(linesCh chan types.SourcedLine) Model {
 	return NewModelWithGeoIP(linesCh, nil)
+}
+
+// SetMultiSource toggles per-source display (realtime prefixes and the
+// summary Top Sources block). Must be called before the program starts.
+func (m *Model) SetMultiSource(multi bool) {
+	m.multiSource = multi
 }
 
 // NewModelWithGeoIP returns a Model wired to enrich every parsed entry with
 // the given GeoIP enricher before it reaches the analysis engine. Pass nil
 // to disable GeoIP (equivalent to NewModel).
-func NewModelWithGeoIP(linesCh chan string, g *enrich.GeoIP) Model {
+func NewModelWithGeoIP(linesCh chan types.SourcedLine, g *enrich.GeoIP) Model {
 	return NewModelWithGeoIPAndPatterns(linesCh, g, nil)
 }
 
-func NewModelWithGeoIPAndPatterns(linesCh chan string, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
+func NewModelWithGeoIPAndPatterns(linesCh chan types.SourcedLine, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
 	det := analysis.NewDetectorWithPatterns(custom)
 	eng := analysis.New(types.Filters{})
 	eng.SetDetector(det)
@@ -114,13 +131,13 @@ func (m Model) Init() tea.Cmd {
 	)
 }
 
-func waitForLines(ch chan string) tea.Cmd {
+func waitForLines(ch chan types.SourcedLine) tea.Cmd {
 	return func() tea.Msg {
 		line, ok := <-ch
 		if !ok {
 			return StreamEndMsg{}
 		}
-		return LineMsg(line)
+		return LineMsg{Source: line.Source, Text: line.Text}
 	}
 }
 
@@ -183,11 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case LineMsg:
-		line := string(msg)
-		entry, err := parser.Parse(line)
+		entry, err := parser.Parse(msg.Text)
 		if err == nil && entry != nil {
 			switch e := entry.(type) {
 			case *types.LogEntry:
+				e.Source = msg.Source
 				if m.geoip != nil && e.RemoteIP != "" {
 					if info, lerr := m.geoip.Lookup(e.RemoteIP); lerr == nil {
 						e.Geo = info
@@ -199,6 +216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.recentLogs = append(m.recentLogs, e)
 			case *types.OperationalEntry:
+				e.Source = msg.Source
 				if m.opEngine != nil {
 					m.opEngine.Process(e)
 				}
@@ -460,6 +478,15 @@ func (m Model) renderSummary(b *strings.Builder) {
 	fmt.Fprintf(b, "    Max: %s\n", output.FormatDuration(s.MaxDuration))
 	fmt.Fprintf(b, "    P50: %s\n", output.FormatDuration(s.Percentile50))
 	fmt.Fprintf(b, "    P95: %s\n", output.FormatDuration(s.Percentile95))
+
+	// Multi-source sessions: show the deterministic Top Sources ranking
+	// (count desc, name asc), mirroring the report breakdown.
+	if m.multiSource && len(s.SourceCounts) > 0 {
+		fmt.Fprintf(b, "\n  %s:\n", styleLabel.Render("Top Sources"))
+		for i, item := range analysis.TopN(s.SourceCounts, 8) {
+			fmt.Fprintf(b, "    %d. %-40s %d\n", i+1, truncate(item.Key, 38), item.Count)
+		}
+	}
 }
 
 func (m Model) renderRealtime(b *strings.Builder) {
@@ -471,6 +498,10 @@ func (m Model) renderRealtime(b *strings.Builder) {
 	for _, e := range m.recentLogs {
 		if e == nil {
 			continue
+		}
+		sourceStr := ""
+		if m.multiSource {
+			sourceStr = styleTailDim.Render("[" + truncate(e.Source, 24) + "] ")
 		}
 		timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
 		statusStr := tuiFormatStatus(e.Status)
@@ -487,8 +518,8 @@ func (m Model) renderRealtime(b *strings.Builder) {
 			uaInfo = fmt.Sprintf(" [%s/%s]", e.OS, e.Browser)
 		}
 
-		fmt.Fprintf(b, "  %s  %s  %s %s  (%s, %s) - %s%s\n",
-			timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStr, uaInfo)
+		fmt.Fprintf(b, "  %s%s  %s  %s %s  (%s, %s) - %s%s\n",
+			sourceStr, timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStr, uaInfo)
 	}
 }
 
@@ -634,6 +665,10 @@ func (m Model) renderOperational(b *strings.Builder) {
 			start = len(m.recentOps) - 15
 		}
 		for _, e := range m.recentOps[start:] {
+			sourceStr := ""
+			if m.multiSource && e.Source != "" {
+				sourceStr = styleTailDim.Render("[" + truncate(e.Source, 24) + "] ")
+			}
 			timeStr := styleTailDim.Render(e.Timestamp.Format("15:04:05"))
 			var lvlStr string
 			switch e.Level {
@@ -648,7 +683,7 @@ func (m Model) renderOperational(b *strings.Builder) {
 			if e.Logger != "" {
 				loggerStr = styleInfo.Render("[" + e.Logger + "]")
 			}
-			fmt.Fprintf(b, "  %s  %s  %s  %s\n", timeStr, lvlStr, loggerStr, e.Msg)
+			fmt.Fprintf(b, "  %s%s  %s  %s  %s\n", sourceStr, timeStr, lvlStr, loggerStr, e.Msg)
 		}
 	}
 }

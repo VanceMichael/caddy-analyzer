@@ -37,6 +37,7 @@ Dimensions:
   country     Top client countries (requires GeoIP mmdb)
   city        Top client cities (requires a city GeoIP mmdb)
   asn         Top client autonomous systems (requires GeoIP mmdb)
+  source      Top input sources by request count (files, docker://, k8s://, journalctl://, stdin)
 
 Useful Flags:
   -t, --top <N>      Number of top entries to display (default: 10)
@@ -105,7 +106,7 @@ func runTopCmd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			continue
 		}
-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, err error) {
+		processParsedLines(ctx, lines, configuredWorkers(), func(_ string, entry types.Entry, err error) {
 			if err != nil || entry == nil {
 				bar.Add(1)
 				return
@@ -200,6 +201,8 @@ func topFieldForDimension(dim string) (types.TopField, bool) {
 		return types.TopCity, true
 	case "asn":
 		return types.TopASN, true
+	case "source", "sources":
+		return types.TopSource, true
 	case "bandwidth", "bytes":
 		return types.TopPath, true
 	}
@@ -233,6 +236,8 @@ func topItems(dim string, s *types.Stats, n int) []types.CountItem {
 		return analysis.TopN(s.CityCounts, n)
 	case "asn":
 		return analysis.TopN(s.ASNCounts, n)
+	case "source", "sources":
+		return analysis.TopN(s.SourceCounts, n)
 	}
 	return nil
 }
@@ -259,6 +264,8 @@ func topTitle(dim string) string {
 		return "Cities"
 	case "asn":
 		return "Autonomous Systems"
+	case "source", "sources":
+		return "Sources"
 	}
 	return "Results"
 }
@@ -283,7 +290,7 @@ func writeTopCSV(w io.Writer, items []types.CountItem) error {
 
 func isSupportedDimension(s string) bool {
 	switch strings.ToLower(s) {
-	case "path", "paths", "ip", "ips", "ua", "useragent", "user-agent", "status", "method", "methods", "host", "hosts", "bandwidth", "bytes", "country", "countries", "city", "cities", "asn":
+	case "path", "paths", "ip", "ips", "ua", "useragent", "user-agent", "status", "method", "methods", "host", "hosts", "bandwidth", "bytes", "country", "countries", "city", "cities", "asn", "source", "sources":
 		return true
 	}
 	return false

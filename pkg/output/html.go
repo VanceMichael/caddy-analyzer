@@ -33,7 +33,11 @@ func (r *Report) printHTML() error {
 	out := generateHTMLReport(s, total, r.engine.RPS(), r.engine.AvgDuration(),
 		topPaths, topIPs, topUAs, topMethods, topCountries, topCities, topASNs, topProtos, topTLS, topBots, topReferers, topPathBytes, suspicious, r.detect, r.activeFilters(), s.SuspiciousDetails)
 
-	// Inject operational events card before </body> if present
+	// Inject multi-source and operational cards before </body> if present.
+	// The sources card is omitted for single-source sessions.
+	if rows := r.sourceRows(); len(rows) > 1 {
+		out = strings.Replace(out, "</body>", generateSourcesHTML(rows)+"</body>", 1)
+	}
 	if r.opStats != nil && r.opStats.TotalEvents > 0 {
 		op := generateOperationalHTML(r.opStats, r.top)
 		out = strings.Replace(out, "</body>", op+"</body>", 1)
@@ -459,6 +463,24 @@ func renderActiveFiltersHTML(filters []string) string {
 
 func escapeHTML(s string) string {
 	return html.EscapeString(s)
+}
+
+// generateSourcesHTML renders the per-source reconciliation card for the
+// HTML report. Rows arrive in the shared deterministic order, so HTML output
+// ranks sources identically to table/JSON/CSV/remote formats.
+func generateSourcesHTML(rows []types.SourceStat) string {
+	var body string
+	for _, row := range rows {
+		errCell := ""
+		if row.ParseErrors > 0 {
+			errCell = fmt.Sprintf(`<td class="count" style="color:#f87171">%d</td>`, row.ParseErrors)
+		} else {
+			errCell = fmt.Sprintf(`<td class="count">%d</td>`, row.ParseErrors)
+		}
+		body += fmt.Sprintf(`<tr><td>%s</td><td class="count">%d</td><td class="count">%d</td>%s</tr>`,
+			escapeHTML(row.Source), row.Requests, row.OperationalEvents, errCell)
+	}
+	return fmt.Sprintf(`<div class="card"><h2>Sources</h2><table><thead><tr><th>Source</th><th>Requests</th><th>Operational Events</th><th>Parse Errors</th></tr></thead><tbody>%s</tbody></table></div>`, body)
 }
 
 // generateOperationalHTML renders the Operational Events card for the HTML

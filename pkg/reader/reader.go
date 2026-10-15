@@ -17,7 +17,7 @@ import (
 )
 
 type LogReader interface {
-	Read(ctx context.Context) (<-chan string, error)
+	Read(ctx context.Context) (<-chan types.SourcedLine, error)
 	Name() string
 }
 
@@ -36,8 +36,6 @@ func fromSource(src types.LogSource, follow bool) LogReader {
 	switch src.Type {
 	case types.SourceStdin:
 		return &StdinReader{}
-	case types.SourceFile:
-		return &FileReader{paths: expandPaths(src.Path), follow: follow}
 	case types.SourceDocker:
 		return &DockerReader{container: src.Path, follow: follow}
 	case types.SourceK8s:
@@ -60,7 +58,14 @@ func ParseSource(raw string) types.LogSource {
 		case "docker":
 			return types.LogSource{Type: types.SourceDocker, Path: parts[1]}
 		case "k8s":
-			return types.LogSource{Type: types.SourceK8s, Path: parts[1]}
+			// Accept both k8s://pod and k8s://namespace/pod. Pod names
+			// cannot contain "/", so the first segment is unambiguous.
+			pod := parts[1]
+			ns := ""
+			if idx := strings.Index(pod, "/"); idx >= 0 {
+				ns, pod = pod[:idx], pod[idx+1:]
+			}
+			return types.LogSource{Type: types.SourceK8s, Path: pod, Namespace: ns}
 		case "journalctl":
 			return types.LogSource{Type: types.SourceJournalctl, Path: parts[1]}
 		}
@@ -77,15 +82,30 @@ func expandPaths(pattern string) []string {
 	return matches
 }
 
-func newLineChannel() chan string {
-	return make(chan string, 1000)
+// sourceID returns the canonical statistics key for a concrete file path.
+func sourceID(path string) string {
+	return filepath.Clean(path)
+}
+
+func newLineChannel() chan types.SourcedLine {
+	return make(chan types.SourcedLine, 1000)
+}
+
+// emitLine sends one tagged line, honoring cancellation.
+func emitLine(ctx context.Context, out chan<- types.SourcedLine, source, line string) error {
+	select {
+	case out <- types.SourcedLine{Source: source, Text: line}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type StdinReader struct{}
 
 func (r *StdinReader) Name() string { return "stdin" }
 
-func (r *StdinReader) Read(ctx context.Context) (<-chan string, error) {
+func (r *StdinReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
 	// Defense-in-depth: resolveSources already refuses the stdin fallback
 	// when stdin is a TTY, but a caller can still construct a StdinReader
 	// directly (e.g. explicit "-"). Reading from a TTY with bufio.Scanner
@@ -100,9 +120,7 @@ func (r *StdinReader) Read(ctx context.Context) (<-chan string, error) {
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 		for scanner.Scan() {
-			select {
-			case out <- scanner.Text():
-			case <-ctx.Done():
+			if err := emitLine(ctx, out, "stdin", scanner.Text()); err != nil {
 				return
 			}
 		}
@@ -122,7 +140,7 @@ func (r *FileReader) Name() string {
 	return fmt.Sprintf("%d files", len(r.paths))
 }
 
-func (r *FileReader) Read(ctx context.Context) (<-chan string, error) {
+func (r *FileReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
 	out := newLineChannel()
 	if r.follow && len(r.paths) > 1 {
 		// In follow mode with multiple files, read them concurrently
@@ -161,32 +179,32 @@ func (r *FileReader) Read(ctx context.Context) (<-chan string, error) {
 	return out, nil
 }
 
-func readFileLines(ctx context.Context, path string, out chan<- string) error {
+func readFileLines(ctx context.Context, path string, out chan<- types.SourcedLine) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 
+	source := sourceID(path)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 	for scanner.Scan() {
-		select {
-		case out <- scanner.Text():
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := emitLine(ctx, out, source, scanner.Text()); err != nil {
+			return err
 		}
 	}
 	return scanner.Err()
 }
 
-func readFileAndFollow(ctx context.Context, path string, out chan<- string) error {
+func readFileAndFollow(ctx context.Context, path string, out chan<- types.SourcedLine) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = f.Close() }()
 
+	source := sourceID(path)
 	initialInfo, err := f.Stat()
 	if err != nil {
 		return err
@@ -205,10 +223,8 @@ func readFileAndFollow(ctx context.Context, path string, out chan<- string) erro
 			break
 		}
 		line = strings.TrimRight(line, "\n")
-		select {
-		case out <- line:
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := emitLine(ctx, out, source, line); err != nil {
+			return err
 		}
 	}
 
@@ -259,10 +275,8 @@ func readFileAndFollow(ctx context.Context, path string, out chan<- string) erro
 					break
 				}
 				line = strings.TrimRight(line, "\n")
-				select {
-				case out <- line:
-				case <-ctx.Done():
-					return ctx.Err()
+				if err := emitLine(ctx, out, source, line); err != nil {
+					return err
 				}
 			}
 
@@ -278,7 +292,10 @@ type DockerReader struct {
 
 func (r *DockerReader) Name() string { return "docker:" + r.container }
 
-func (r *DockerReader) Read(ctx context.Context) (<-chan string, error) {
+// Source returns the canonical source identity for statistics.
+func (r *DockerReader) Source() string { return "docker://" + r.container }
+
+func (r *DockerReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
 	out := newLineChannel()
 	args := []string{"logs"}
 	if r.follow {
@@ -292,7 +309,7 @@ func (r *DockerReader) Read(ctx context.Context) (<-chan string, error) {
 	args = append(args, r.container)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	return execLines(ctx, cmd, out)
+	return execLines(ctx, cmd, r.Source(), out)
 }
 
 type K8sReader struct {
@@ -301,15 +318,23 @@ type K8sReader struct {
 	follow    bool
 }
 
-func (r *K8sReader) Name() string {
-	ns := r.namespace
-	if ns == "" {
-		ns = "default"
+func (r *K8sReader) namespaceOrDefault() string {
+	if r.namespace == "" {
+		return types.DefaultK8sNamespace
 	}
-	return fmt.Sprintf("k8s:%s (ns:%s)", r.pod, ns)
+	return r.namespace
 }
 
-func (r *K8sReader) Read(ctx context.Context) (<-chan string, error) {
+func (r *K8sReader) Name() string {
+	return fmt.Sprintf("k8s:%s (ns:%s)", r.pod, r.namespaceOrDefault())
+}
+
+// Source returns the canonical source identity (namespace + pod).
+func (r *K8sReader) Source() string {
+	return fmt.Sprintf("k8s://%s/%s", r.namespaceOrDefault(), r.pod)
+}
+
+func (r *K8sReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
 	out := newLineChannel()
 	args := []string{"logs", "--tail=-1"}
 	if r.follow {
@@ -321,7 +346,7 @@ func (r *K8sReader) Read(ctx context.Context) (<-chan string, error) {
 	args = append(args, r.pod)
 
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	return execLines(ctx, cmd, out)
+	return execLines(ctx, cmd, r.Source(), out)
 }
 
 type JournalctlReader struct {
@@ -331,17 +356,20 @@ type JournalctlReader struct {
 
 func (r *JournalctlReader) Name() string { return "journalctl:" + r.unit }
 
-func (r *JournalctlReader) Read(ctx context.Context) (<-chan string, error) {
+// Source returns the canonical source identity for statistics.
+func (r *JournalctlReader) Source() string { return "journalctl://" + r.unit }
+
+func (r *JournalctlReader) Read(ctx context.Context) (<-chan types.SourcedLine, error) {
 	out := newLineChannel()
 	args := []string{"-u", r.unit, "--output=cat"}
 	if r.follow {
 		args = append(args, "--follow")
 	}
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
-	return execLines(ctx, cmd, out)
+	return execLines(ctx, cmd, r.Source(), out)
 }
 
-func execLines(ctx context.Context, cmd *exec.Cmd, out chan string) (<-chan string, error) {
+func execLines(ctx context.Context, cmd *exec.Cmd, source string, out chan types.SourcedLine) (<-chan types.SourcedLine, error) {
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -359,9 +387,7 @@ func execLines(ctx context.Context, cmd *exec.Cmd, out chan string) (<-chan stri
 		scanner := bufio.NewScanner(pr)
 		scanner.Buffer(make([]byte, 64*1024), MaxLineSize)
 		for scanner.Scan() {
-			select {
-			case out <- scanner.Text():
-			case <-ctx.Done():
+			if err := emitLine(ctx, out, source, scanner.Text()); err != nil {
 				_ = cmd.Process.Kill()
 				_ = cmd.Wait()
 				return

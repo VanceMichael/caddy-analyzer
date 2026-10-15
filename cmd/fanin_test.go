@@ -16,6 +16,9 @@ import (
 // test for the bug where runFollowMode/runTail iterated sources sequentially
 // and blocked forever on the first follow reader (which only closes on
 // ctx.Done), silently dropping every subsequent source.
+//
+// Every delivered line must also carry the canonical identity of the concrete
+// file it came from: after fan-in, attribution must survive intact.
 func TestFanInFollowMultipleSources(t *testing.T) {
 	dir := t.TempDir()
 	f1 := filepath.Join(dir, "a.log")
@@ -39,17 +42,23 @@ func TestFanInFollowMultipleSources(t *testing.T) {
 
 	// Collect until we have all 6 lines or time out. Follow readers deliver
 	// existing content first, so all 6 should arrive quickly.
-	got := make(map[string]bool)
+	bySource := map[string]map[string]bool{}
 	deadline := time.After(2 * time.Second)
-	for len(got) < 6 {
+	for len(bySource[filepath.Clean(f1)])+len(bySource[filepath.Clean(f2)]) < 6 {
 		select {
 		case line, ok := <-ch:
 			if !ok {
-				t.Fatalf("channel closed before collecting all lines; got %d: %v", len(got), got)
+				t.Fatalf("channel closed before collecting all lines; got %v", bySource)
 			}
-			got[line] = true
+			if bySource[line.Source] == nil {
+				bySource[line.Source] = map[string]bool{}
+			}
+			if line.Source != filepath.Clean(f1) && line.Source != filepath.Clean(f2) {
+				t.Errorf("line %q has unexpected source %q", line.Text, line.Source)
+			}
+			bySource[line.Source][line.Text] = true
 		case <-deadline:
-			t.Fatalf("timeout: collected %d/%d lines: %v", len(got), 6, got)
+			t.Fatalf("timeout: collected %v", bySource)
 		}
 	}
 
@@ -64,17 +73,20 @@ func TestFanInFollowMultipleSources(t *testing.T) {
 		t.Fatal("channel did not close after context cancellation")
 	}
 
-	// The fix's whole point: lines from BOTH sources must be present. Before
-	// the fix only f1's lines ("a*") would arrive.
-	for _, want := range []string{"a1", "a2", "a3", "b1", "b2", "b3"} {
-		if !got[want] {
-			t.Errorf("missing line %q from fan-in; got %v", want, got)
+	// The fix's whole point: lines from BOTH sources must be present with
+	// the right source label on every line.
+	for text, wantSource := range map[string]string{
+		"a1": filepath.Clean(f1), "a2": filepath.Clean(f1), "a3": filepath.Clean(f1),
+		"b1": filepath.Clean(f2), "b2": filepath.Clean(f2), "b3": filepath.Clean(f2),
+	} {
+		if !bySource[wantSource][text] {
+			t.Errorf("missing or mislabeled line %q (want source %s); got %v", text, wantSource, bySource)
 		}
 	}
 }
 
 // TestFanInFollowBadSourceSkipped ensures a failing source does not abort the
-// fan-in: remaining sources must still be delivered.
+// fan-in: remaining sources must still be delivered with their own identity.
 func TestFanInFollowBadSourceSkipped(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.log")
@@ -100,7 +112,10 @@ func TestFanInFollowBadSourceSkipped(t *testing.T) {
 			if !ok {
 				t.Fatalf("channel closed early; got %v", got)
 			}
-			got[line] = true
+			if line.Source != filepath.Clean(good) {
+				t.Errorf("line %q source = %q, want %q", line.Text, line.Source, filepath.Clean(good))
+			}
+			got[line.Text] = true
 		case <-deadline:
 			t.Fatalf("timeout: got %v", got)
 		}
@@ -115,7 +130,7 @@ type errorFollowReader struct{}
 
 func (errorFollowReader) Name() string { return "broken" }
 
-func (errorFollowReader) Read(context.Context) (<-chan string, error) {
+func (errorFollowReader) Read(context.Context) (<-chan types.SourcedLine, error) {
 	return nil, os.ErrNotExist
 }
 

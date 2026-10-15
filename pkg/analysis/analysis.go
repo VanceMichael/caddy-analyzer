@@ -136,6 +136,13 @@ func (e *Engine) Process(entry *types.LogEntry) {
 	s := e.stats
 	s.TotalRequests++
 
+	// Attribute the accepted request to its canonical source. Entries
+	// constructed outside the tagged pipeline carry an empty source and
+	// are not counted here, keeping single-source/default output intact.
+	if entry.Source != "" {
+		s.SourceCounts[entry.Source]++
+	}
+
 	if !entry.Timestamp.IsZero() {
 		if s.StartTime.IsZero() || entry.Timestamp.Before(s.StartTime) {
 			s.StartTime = entry.Timestamp
@@ -289,6 +296,50 @@ func TopNInt(m map[int]int64, n int) []types.CountIntItem {
 		items = items[:n]
 	}
 	return items
+}
+
+// SourceStats merges per-source HTTP request, operational event, and parse
+// error counters into reconciliation rows with one deterministic order used
+// by every report format (table, JSON, CSV, HTML, Elasticsearch/OpenSearch,
+// Loki) so the same inputs always produce the same source ranking. Rows are
+// sorted by total activity (requests + events + errors) descending, then by
+// canonical source name ascending. Empty source keys (untagged entries) are
+// skipped so untagged/single-source flows produce no phantom rows.
+func SourceStats(requests, events, parseErrors map[string]int64) []types.SourceStat {
+	keys := make(map[string]struct{})
+	for k := range requests {
+		if k != "" {
+			keys[k] = struct{}{}
+		}
+	}
+	for k := range events {
+		if k != "" {
+			keys[k] = struct{}{}
+		}
+	}
+	for k := range parseErrors {
+		if k != "" {
+			keys[k] = struct{}{}
+		}
+	}
+	rows := make([]types.SourceStat, 0, len(keys))
+	for k := range keys {
+		rows = append(rows, types.SourceStat{
+			Source:            k,
+			Requests:          requests[k],
+			OperationalEvents: events[k],
+			ParseErrors:       parseErrors[k],
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		ti := rows[i].Requests + rows[i].OperationalEvents + rows[i].ParseErrors
+		tj := rows[j].Requests + rows[j].OperationalEvents + rows[j].ParseErrors
+		if ti != tj {
+			return ti > tj
+		}
+		return rows[i].Source < rows[j].Source
+	})
+	return rows
 }
 
 func (e *Engine) match(entry *types.LogEntry) bool {

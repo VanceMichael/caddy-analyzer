@@ -165,7 +165,7 @@ func analyzeSources(ctx context.Context, sources []types.LogSource, filters type
 		if err != nil {
 			return nil, nil, fmt.Errorf("read %s: %w", r.Name(), err)
 		}
-		processParsedLines(ctx, lines, configuredWorkers(), func(entry types.Entry, parseErr error) {
+		processParsedLines(ctx, lines, configuredWorkers(), func(_ string, entry types.Entry, parseErr error) {
 			if parseErr != nil || entry == nil {
 				return
 			}

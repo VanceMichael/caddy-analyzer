@@ -33,6 +33,13 @@ func (e *OperationalEngine) Process(entry *types.OperationalEntry) {
 	s := e.stats
 	s.TotalEvents++
 
+	if entry.Source != "" {
+		if s.SourceCounts == nil {
+			s.SourceCounts = make(map[string]int64)
+		}
+		s.SourceCounts[entry.Source]++
+	}
+
 	if !entry.Timestamp.IsZero() {
 		if s.StartTime.IsZero() || entry.Timestamp.Before(s.StartTime) {
 			s.StartTime = entry.Timestamp

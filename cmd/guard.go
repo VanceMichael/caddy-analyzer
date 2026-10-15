@@ -167,6 +167,30 @@ func runGuard(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Guard's sliding-window engine consumes raw lines; bridge the
+	// tagged fan-in to the string channel it expects while preserving
+	// cancellation. Lines already queued by other sources keep flowing
+	// even if one source ends or fails to open.
+	rawLines := make(chan string, 1000)
+	go func() {
+		defer close(rawLines)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case line, ok := <-linesCh:
+				if !ok {
+					return
+				}
+				select {
+				case rawLines <- line.Text:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
 	guardNotify.auditLog = guardAuditLog
 	dispatcher, err := guardNotify.dispatcher()
 	if err != nil {
@@ -384,7 +408,7 @@ func runGuard(cmd *cobra.Command, args []string) error {
 
 	done := make(chan struct{})
 	go func() {
-		g.Run(ctx, linesCh, logf)
+		g.Run(ctx, rawLines, logf)
 		close(done)
 	}()
 

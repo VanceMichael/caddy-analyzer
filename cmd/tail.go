@@ -115,29 +115,36 @@ func runTail(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// In a multi-source session every line is prefixed with its canonical
+	// source; single-source sessions keep the original compact layout.
+	multi := len(sources) > 1
+
 	for line := range fanInFollow(ctx, sources) {
-		entry, err := parser.Parse(line)
+		entry, err := parser.Parse(line.Text)
 		if err != nil || entry == nil {
 			continue
 		}
+		prefix := sourcePrefix(line.Source, multi)
 		switch e := entry.(type) {
 		case *types.LogEntry:
 			if filters.OpsOnly {
 				continue
 			}
+			e.Source = line.Source
 			applyForwarded(e, filters)
 			enrichGeoIP(e, geoip)
 			if !analysis.MatchEntry(e, filters) {
 				continue
 			}
-			if err := printColorizedLog(e, det); err != nil {
+			if err := printColorizedLog(e, det, prefix); err != nil {
 				break
 			}
 		case *types.OperationalEntry:
 			if !analysis.MatchOperational(e, filters) {
 				continue
 			}
-			if err := printColorizedOperational(e); err != nil {
+			e.Source = line.Source
+			if err := printColorizedOperational(e, prefix); err != nil {
 				break
 			}
 		}
@@ -145,7 +152,17 @@ func runTail(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printColorizedLog(e *types.LogEntry, det *analysis.Detector) error {
+// sourcePrefix renders the dim source tag for multi-source tail sessions.
+// It returns an empty string in single-source sessions so the compact
+// single-source layout is byte-identical to the old behavior.
+func sourcePrefix(source string, multi bool) string {
+	if !multi || source == "" {
+		return ""
+	}
+	return styleTailDim.Render("[" + source + "] ")
+}
+
+func printColorizedLog(e *types.LogEntry, det *analysis.Detector, prefix string) error {
 	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
 	statusStr := formatStatus(e.Status)
 	methodStr := lipgloss.NewStyle().Bold(true).Render(e.Method)
@@ -220,8 +237,8 @@ func printColorizedLog(e *types.LogEntry, det *analysis.Detector) error {
 		}
 	}
 
-	_, err := fmt.Printf("%s  %s  %s %s  (%s, %s) - %s%s%s%s\n",
-		timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStyled, geoInfo, uaInfo, threatSuffix)
+	_, err := fmt.Printf("%s%s  %s  %s %s  (%s, %s) - %s%s%s%s\n",
+		prefix, timeStr, statusStr, methodStr, pathStr, sizeStr, durStr, ipStyled, geoInfo, uaInfo, threatSuffix)
 	return err
 }
 
@@ -241,7 +258,7 @@ func formatStatus(s int) string {
 	}
 }
 
-func printColorizedOperational(e *types.OperationalEntry) error {
+func printColorizedOperational(e *types.OperationalEntry, prefix string) error {
 	timeStr := styleTailDim.Render(e.Timestamp.Format(time.DateTime))
 
 	var lvlStr string
@@ -290,6 +307,6 @@ func printColorizedOperational(e *types.OperationalEntry) error {
 		extraStr = styleTailDim.Render(" " + strings.Join(extras, " "))
 	}
 
-	_, err := fmt.Printf("%s  %s  %s  %s%s\n", timeStr, lvlStr, loggerStr, msgStr, extraStr)
+	_, err := fmt.Printf("%s%s  %s  %s  %s%s\n", prefix, timeStr, lvlStr, loggerStr, msgStr, extraStr)
 	return err
 }

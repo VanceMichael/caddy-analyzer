@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -127,6 +128,11 @@ type LogEntry struct {
 	RealIP        string
 	Authorization string
 	Geo           GeoInfo
+	// Source is the canonical identity of the logical input the line was
+	// read from (file path, "stdin", docker://..., k8s://ns/pod,
+	// journalctl://...). Populated by the pipeline after parsing; empty
+	// for entries constructed directly.
+	Source string
 }
 
 // Entry is a marker interface implemented by all parsed log entry types.
@@ -153,6 +159,9 @@ type OperationalEntry struct {
 	// (upstream, error, config_file, etc.). Values are the raw JSON tokens
 	// so callers can decode them lazily.
 	Extra map[string]json.RawMessage
+	// Source is the canonical identity of the logical input the line was
+	// read from. Populated by the pipeline after parsing.
+	Source string
 }
 
 func (*OperationalEntry) entry() {}
@@ -238,6 +247,55 @@ type LogSource struct {
 	Namespace string
 }
 
+// DefaultK8sNamespace is the canonical namespace used for k8s sources
+// specified without an explicit namespace (flags or k8s://ns/pod URL).
+const DefaultK8sNamespace = "default"
+
+// Canonical returns the stable, display-order-independent identity of the
+// logical input. A file glob is expanded by the caller into one LogSource
+// per matched file, so a file source's canonical identity is the cleaned
+// concrete path. Equal canonical identities (e.g. "a.log" and "./a.log",
+// a repeated argument) merge into one statistics key.
+func (s LogSource) Canonical() string {
+	switch s.Type {
+	case SourceStdin:
+		return "stdin"
+	case SourceDocker:
+		return "docker://" + s.Path
+	case SourceK8s:
+		ns := s.Namespace
+		if ns == "" {
+			ns = DefaultK8sNamespace
+		}
+		return "k8s://" + ns + "/" + s.Path
+	case SourceJournalctl:
+		return "journalctl://" + s.Path
+	default:
+		return filepath.Clean(s.Path)
+	}
+}
+
+// SourcedLine is a raw log line tagged with the canonical identity of the
+// input that produced it. It travels unchanged through sequential reads,
+// follow fan-in, cancellation, and ordered parallel parsing so HTTP
+// entries, operational entries, and parse failures never lose or swap
+// their source label after fan-in.
+type SourcedLine struct {
+	Source string
+	Text   string
+}
+
+// SourceStat is the per-source reconciliation row shared by every report
+// format: requests accepted by the HTTP engine, operational events
+// accepted by the operational engine, and parse failures attributed to
+// the source before either engine saw the line.
+type SourceStat struct {
+	Source            string `json:"source"`
+	Requests          int64  `json:"requests"`
+	OperationalEvents int64  `json:"operational_events"`
+	ParseErrors       int64  `json:"parse_errors"`
+}
+
 type Filters struct {
 	From       time.Time
 	To         time.Time
@@ -295,6 +353,7 @@ const (
 	TopCountry    TopField = "country"
 	TopASN        TopField = "asn"
 	TopCity       TopField = "city"
+	TopSource     TopField = "source"
 )
 
 type GeoLocation struct {
@@ -329,6 +388,14 @@ type Stats struct {
 	// names (e.g. "Italy") for display. Populated by the GeoIP enricher
 	// alongside CountryCounts.
 	CountryNames map[string]string
+	// SourceCounts tracks accepted HTTP requests per canonical source
+	// identity. Unlike the high-cardinality traffic counters it is not
+	// bounded by MaxCardinality (the number of inputs is small) so the
+	// per-source breakdown always reconciles with TotalRequests.
+	SourceCounts map[string]int64
+	// SourceParseErrors tracks unparseable lines per canonical source
+	// identity; the sum over all keys mirrors ParseErrors.
+	SourceParseErrors map[string]int64
 	// PathErrorCounts tracks 5xx responses per path. Used by the diff
 	// engine to surface NEW error paths (paths that errored in target but
 	// were absent or healthy in baseline) rather than any new path.
@@ -432,6 +499,8 @@ func NewStats() *Stats {
 		CountryNames:         make(map[string]string),
 		CityCounts:           make(map[string]int64),
 		CityLocations:        make(map[string]GeoLocation),
+		SourceCounts:         make(map[string]int64),
+		SourceParseErrors:    make(map[string]int64),
 		MinDuration:          1<<63 - 1,
 	}
 }
@@ -463,6 +532,19 @@ func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
 	m[key] = n
 }
 
+// RecordSourceParseError attributes an unparseable line to a source. The
+// empty source (entries constructed outside the tagged pipeline) is
+// ignored so single-source/default behavior stays unchanged.
+func (s *Stats) RecordSourceParseError(source string) {
+	if source == "" {
+		return
+	}
+	if s.SourceParseErrors == nil {
+		s.SourceParseErrors = make(map[string]int64)
+	}
+	s.SourceParseErrors[source]++
+}
+
 func (s *Stats) AddDuration(d float64) {
 	s.durHist.add(d)
 }
@@ -481,6 +563,9 @@ type OperationalStats struct {
 	LevelCounts  map[string]int64 // info, warn, error, debug
 	LoggerCounts map[string]int64 // "tls", "http", "admin", ""
 	MsgCounts    map[string]int64
+	// SourceCounts tracks accepted operational events per canonical
+	// source identity (not cardinality-bounded; inputs are few).
+	SourceCounts map[string]int64
 	StartTime    time.Time
 	EndTime      time.Time
 	Errors       int64 // count of level == "error"
@@ -492,5 +577,6 @@ func NewOperationalStats() *OperationalStats {
 		LevelCounts:  make(map[string]int64),
 		LoggerCounts: make(map[string]int64),
 		MsgCounts:    make(map[string]int64),
+		SourceCounts: make(map[string]int64),
 	}
 }
