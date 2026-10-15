@@ -89,6 +89,9 @@ func runTopCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := analysis.New(filters)
+	// The global cardinality option applies to top too; otherwise huge
+	// dynamic paths/cities/UAs would grow the engine without a cap.
+	engine.Stats().MaxCardinality = flagMaxCard
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 

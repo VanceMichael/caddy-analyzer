@@ -1,0 +1,1208 @@
+diff --git a/cmd/baseline.go b/cmd/baseline.go
+index 0adbe1d..7f6c417 100644
+--- a/cmd/baseline.go
++++ b/cmd/baseline.go
+@@ -149,12 +149,7 @@ func validateBaselinePath(path string) error {
+ }
+ 
+ func analyzeSources(ctx context.Context, sources []types.LogSource, filters types.Filters) (*analysis.Engine, *analysis.OperationalEngine, error) {
+-	engine := analysis.New(filters)
+-	engine.Stats().MaxCardinality = flagMaxCard
+-	if flagDetect {
+-		engine.SetDetector(newDetector())
+-	}
+-	opEngine := analysis.NewOperationalEngine(filters)
++	engine, opEngine := newWindowEngines(filters)
+ 	geoip := newGeoIPEnricher()
+ 	if geoip != nil {
+ 		defer func() { _ = geoip.Close() }()
+diff --git a/cmd/cardinality_test.go b/cmd/cardinality_test.go
+new file mode 100644
+index 0000000..a1b77fc
+--- /dev/null
++++ b/cmd/cardinality_test.go
+@@ -0,0 +1,67 @@
++package cmd
++
++import (
++	"strconv"
++	"testing"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++// TestNewWindowEnginesCardinality is the cmd-level guard for the invariant
++// that every analysis window builds both engines with the global
++// --max-cardinality configuration: once/follow/interval/top/watch and every
++// reset create engines through newWindowEngines.
++func TestNewWindowEnginesCardinality(t *testing.T) {
++	origCard, origDetect := flagMaxCard, flagDetect
++	defer func() { flagMaxCard, flagDetect = origCard, origDetect }()
++	flagDetect = false
++
++	flagMaxCard = 2
++	eng, opEng := newWindowEngines(types.Filters{})
++	if eng.Stats().MaxCardinality != 2 {
++		t.Errorf("HTTP engine MaxCardinality = %d, want 2", eng.Stats().MaxCardinality)
++	}
++	if opEng.Stats().MaxCardinality != 2 {
++		t.Errorf("operational engine MaxCardinality = %d, want 2", opEng.Stats().MaxCardinality)
++	}
++
++	for i, p := range []string{"/a", "/b", "/c"} {
++		eng.Process(&types.LogEntry{URI: p, Status: 200, Size: int64(10 + i)})
++	}
++	for i := 0; i < 3; i++ {
++		opEng.Process(&types.OperationalEntry{Level: "info", Logger: "tls", Msg: "msg-" + strconv.Itoa(i)})
++	}
++	if len(eng.Stats().PathCounts) != 2 {
++		t.Errorf("HTTP PathCounts = %d keys, want 2", len(eng.Stats().PathCounts))
++	}
++	if len(opEng.Stats().MsgCounts) != 2 {
++		t.Errorf("operational MsgCounts = %d keys, want 2", len(opEng.Stats().MsgCounts))
++	}
++	if eng.Stats().TotalRequests != 3 || opEng.Stats().TotalEvents != 3 {
++		t.Errorf("global totals must stay exact: http=%d ops=%d", eng.Stats().TotalRequests, opEng.Stats().TotalEvents)
++	}
++
++	// Simulate a follow/interval/TUI window boundary: rebuilt engines keep
++	// the same configuration but get fresh, empty capacity.
++	eng, opEng = newWindowEngines(types.Filters{})
++	if eng.Stats().MaxCardinality != 2 || opEng.Stats().MaxCardinality != 2 {
++		t.Fatal("rebuilt engines must keep the configured limit")
++	}
++	if len(eng.Stats().PathCounts) != 0 || len(opEng.Stats().MsgCounts) != 0 {
++		t.Fatal("rebuilt engines must start with fresh (empty) capacity")
++	}
++	eng.Process(&types.LogEntry{URI: "/new", Status: 200})
++	if eng.Stats().PathCounts["/new"] != 1 {
++		t.Error("fresh window must admit keys again")
++	}
++
++	// 0 keeps meaning unlimited.
++	flagMaxCard = 0
++	eng, _ = newWindowEngines(types.Filters{})
++	for i := 0; i < 100; i++ {
++		eng.Process(&types.LogEntry{URI: "/p" + strconv.Itoa(i), Status: 200})
++	}
++	if len(eng.Stats().PathCounts) != 100 {
++		t.Errorf("MaxCardinality=0 must be unlimited, got %d keys", len(eng.Stats().PathCounts))
++	}
++}
+diff --git a/cmd/diff.go b/cmd/diff.go
+index e2f5082..1500df9 100644
+--- a/cmd/diff.go
++++ b/cmd/diff.go
+@@ -144,6 +144,9 @@ func processLogFile(ctx context.Context, path string) (*analysis.Engine, error)
+ 		return nil, fmt.Errorf("invalid filter flags: %w", err)
+ 	}
+ 	engine := analysis.New(filters)
++	// The global cardinality option applies to diff too; huge-cardinality
++	// inputs must not grow the comparison engines without a bound.
++	engine.Stats().MaxCardinality = flagMaxCard
+ 
+ 	geoip := newGeoIPEnricher()
+ 	if geoip != nil {
+diff --git a/cmd/guard.go b/cmd/guard.go
+index 77e1f61..cba9c4f 100644
+--- a/cmd/guard.go
++++ b/cmd/guard.go
+@@ -328,6 +328,7 @@ func runGuard(cmd *cobra.Command, args []string) error {
+ 		UARotationThreshold: guardUARotation,
+ 		CustomPatterns:      customPatterns,
+ 		CredStuffingLimit:   guardCredStuffingLimit,
++		MaxCardinality:      flagMaxCard,
+ 		BlocklistMgr:        blMgr,
+ 		BlocklistRefresh:    blocklistRefresh,
+ 		CountryBlock:        guardCountryBlock,
+diff --git a/cmd/root.go b/cmd/root.go
+index ec11342..8ac790e 100644
+--- a/cmd/root.go
++++ b/cmd/root.go
+@@ -205,7 +205,7 @@ func init() {
+ 	flags.StringVar(&flagGrep, "grep", "", "Search pattern across URI, User-Agent, Remote IP")
+ 	flags.BoolVarP(&flagCompact, "compact", "c", false, "Compact output mode")
+ 	flags.BoolVarP(&flagTrustXFF, "trust-forwarded", "", false, "Trust X-Forwarded-For / X-Real-IP for client IP (use behind a reverse proxy/CDN)")
+-	flags.IntVarP(&flagMaxCard, "max-cardinality", "", 100000, "Max distinct keys tracked per counter (paths, IPs, UAs). 0 = unlimited. Bounds memory on huge-cardinality logs")
++	flags.IntVarP(&flagMaxCard, "max-cardinality", "", 100000, "Max distinct keys per dimension for HTTP and operational counters (paths, IPs, UAs, protocols, cities, loggers, messages, ...). 0 = unlimited. Bounds memory on huge-cardinality logs")
+ 	flags.DurationVar(&flagGeoCacheTTL, "geo-cache-ttl", 24*time.Hour,
+ 		"How long a GeoIP lookup stays cached. 0 disables caching, which is much slower on busy traffic")
+ 	flags.IntVar(&flagGeoCacheSize, "geo-cache-size", 50000,
+@@ -274,9 +274,31 @@ func loadCustomPatterns() error {
+ func newDetector() *analysis.Detector {
+ 	det := analysis.NewDetectorWithPatterns(customPatterns)
+ 	det.SetUARotationThreshold(flagUARotation)
++	// The detector IP working set is log-derived state too: keep it under
++	// the same global cardinality option. SetIPCap(0) means unlimited,
++	// matching --max-cardinality 0; the flag default equals the detector's
++	// own DefaultIPCap, so default runs behave exactly as before.
++	det.SetIPCap(flagMaxCard)
+ 	return det
+ }
+ 
++// newWindowEngines builds a fresh HTTP + operational engine pair for one
++// analysis window and applies the global --max-cardinality configuration to
++// both. Every mode (one-shot, follow, --interval windows) and every window
++// reset MUST create its engines here, so a rebuilt engine can never silently
++// fall back to unbounded maps. Window resets naturally restore fresh
++// capacity while keeping the same configured limit.
++func newWindowEngines(filters types.Filters) (*analysis.Engine, *analysis.OperationalEngine) {
++	eng := analysis.New(filters)
++	eng.Stats().MaxCardinality = flagMaxCard
++	opEng := analysis.NewOperationalEngine(filters)
++	opEng.Stats().MaxCardinality = flagMaxCard
++	if flagDetect {
++		eng.SetDetector(newDetector())
++	}
++	return eng, opEng
++}
++
+ func runAnalysis(cmd *cobra.Command, args []string) error {
+ 	if err := validateFlags(); err != nil {
+ 		return err
+@@ -375,13 +397,7 @@ func newRemoteExporter() (output.RemoteExporter, error) {
+ }
+ 
+ func runOnceMode(ctx context.Context, sources []types.LogSource, filters types.Filters) error {
+-	engine := analysis.New(filters)
+-	opEngine := analysis.NewOperationalEngine(filters)
+-	if flagDetect {
+-		det := newDetector()
+-		engine.SetDetector(det)
+-	}
+-	engine.Stats().MaxCardinality = flagMaxCard
++	engine, opEngine := newWindowEngines(filters)
+ 	sections := types.DefaultTopSections()
+ 	var parseErrors, processed int64
+ 	var entries []*types.LogEntry
+@@ -724,13 +740,7 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
+ 	// do not grow unbounded over a long follow session. Each window emits a
+ 	// fresh report.
+ 	const window = 5 * time.Minute
+-	engine := analysis.New(filters)
+-	opEngine := analysis.NewOperationalEngine(filters)
+-	if flagDetect {
+-		det := newDetector()
+-		engine.SetDetector(det)
+-	}
+-	engine.Stats().MaxCardinality = flagMaxCard
++	engine, opEngine := newWindowEngines(filters)
+ 	windowStart := time.Now()
+ 	remote, err := newRemoteExporter()
+ 	if err != nil {
+@@ -753,13 +763,8 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
+ 	}
+ 
+ 	resetEngine := func() {
+-		engine = analysis.New(filters)
+-		opEngine = analysis.NewOperationalEngine(filters)
+-		if flagDetect {
+-			det := newDetector()
+-			engine.SetDetector(det)
+-		}
+-		engine.Stats().MaxCardinality = flagMaxCard
++		// Same configuration, fresh window capacity.
++		engine, opEngine = newWindowEngines(filters)
+ 		windowStart = time.Now()
+ 	}
+ 
+@@ -852,12 +857,9 @@ func runIntervalMode(ctx context.Context, sources []types.LogSource, filters typ
+ 	}
+ 
+ 	resetEngines := func() {
+-		engine = analysis.New(filters)
+-		opEngine = analysis.NewOperationalEngine(filters)
+-		if flagDetect {
+-			det := newDetector()
+-			engine.SetDetector(det)
+-		}
++		// Every interval window starts fresh but keeps the same
++		// --max-cardinality configuration via newWindowEngines.
++		engine, opEngine = newWindowEngines(filters)
+ 	}
+ 
+ 	for _, src := range sources {
+@@ -952,7 +954,12 @@ func runWatch(ctx context.Context, sources []types.LogSource) error {
+ 		defer func() { _ = geoip.Close() }()
+ 	}
+ 
+-	p := tea.NewProgram(tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns), tea.WithAltScreen())
++	model := tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns)
++	// The dashboard creates and rebuilds its own engines (manual [r] reset
++	// and the 5-minute auto reset); hand the global limit to the model so
++	// the initial engines and every rebuilt window honor it.
++	model.SetMaxCardinality(flagMaxCard)
++	p := tea.NewProgram(model, tea.WithAltScreen())
+ 	_, err = p.Run()
+ 	return err
+ }
+diff --git a/cmd/top.go b/cmd/top.go
+index 6614e05..0703a59 100644
+--- a/cmd/top.go
++++ b/cmd/top.go
+@@ -89,6 +89,9 @@ func runTopCmd(cmd *cobra.Command, args []string) error {
+ 	}
+ 
+ 	engine := analysis.New(filters)
++	// The global cardinality option applies to top too; otherwise huge
++	// dynamic paths/cities/UAs would grow the engine without a cap.
++	engine.Stats().MaxCardinality = flagMaxCard
+ 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+ 	defer cancel()
+ 
+diff --git a/pkg/analysis/analysis.go b/pkg/analysis/analysis.go
+index aaa59f6..3886649 100644
+--- a/pkg/analysis/analysis.go
++++ b/pkg/analysis/analysis.go
+@@ -110,30 +110,36 @@ func (e *Engine) Process(entry *types.LogEntry) {
+ 		return
+ 	}
+ 
++	s := e.stats
++
+ 	if e.detector != nil {
+ 		if dets := e.detector.DetectAll(entry); len(dets) > 0 {
+-			e.stats.SuspiciousIPs[entry.RemoteIP]++
+-			for _, det := range dets {
+-				detail := fmt.Sprintf("[%s] %s %s → %s", det.Type, det.Desc, entry.Method, entry.Path())
+-				if len(e.stats.SuspiciousDetails[entry.RemoteIP]) < 10 {
+-					e.stats.SuspiciousDetails[entry.RemoteIP] = append(e.stats.SuspiciousDetails[entry.RemoteIP], detail)
+-				}
+-				if len(e.stats.SuspiciousDetections[entry.RemoteIP]) < 50 {
+-					e.stats.SuspiciousDetections[entry.RemoteIP] = append(e.stats.SuspiciousDetections[entry.RemoteIP], types.DetectionRecord{
+-						Type:       string(det.Type),
+-						Desc:       det.Desc,
+-						Confidence: det.Confidence,
+-						Method:     entry.Method,
+-						URI:        entry.URI,
+-						Status:     entry.Status,
+-					})
++			// SuspiciousIPs is the dimension primary; SuspiciousDetails
++			// and SuspiciousDetections are companions. All three share
++			// one admission decision, so an IP rejected by the cardinality
++			// cap cannot leave detection details without a parent count.
++			if s.IncStrCount(s.SuspiciousIPs, entry.RemoteIP) {
++				for _, det := range dets {
++					detail := fmt.Sprintf("[%s] %s %s → %s", det.Type, det.Desc, entry.Method, entry.Path())
++					if len(s.SuspiciousDetails[entry.RemoteIP]) < 10 {
++						s.SuspiciousDetails[entry.RemoteIP] = append(s.SuspiciousDetails[entry.RemoteIP], detail)
++					}
++					if len(s.SuspiciousDetections[entry.RemoteIP]) < 50 {
++						s.SuspiciousDetections[entry.RemoteIP] = append(s.SuspiciousDetections[entry.RemoteIP], types.DetectionRecord{
++							Type:       string(det.Type),
++							Desc:       det.Desc,
++							Confidence: det.Confidence,
++							Method:     entry.Method,
++							URI:        entry.URI,
++							Status:     entry.Status,
++						})
++					}
+ 				}
+ 			}
+ 		}
+ 	}
+ 
+ 	e.entries++
+-	s := e.stats
+ 	s.TotalRequests++
+ 
+ 	if !entry.Timestamp.IsZero() {
+@@ -147,20 +153,23 @@ func (e *Engine) Process(entry *types.LogEntry) {
+ 
+ 	s.StatusCounts[entry.Status]++
+ 	s.IncStrCount(s.MethodCounts, entry.Method)
+-	s.IncStrCount(s.PathCounts, entry.Path())
++	path := entry.Path()
++	s.IncStrCount(s.PathCounts, path)
+ 	s.IncStrCount(s.HostCounts, entry.Host)
+ 	s.IncStrCount(s.RemoteAddrCounts, entry.RemoteAddr)
+ 	s.IncStrCount(s.UserAgentCounts, entry.UserAgent)
+ 	s.TotalBytes += entry.Size
+-	s.AddStrBytes(s.PathBytesMap, entry.Path(), entry.Size)
++	// Path bytes/errors are companion dimensions of PathCounts: they are
++	// only recorded for admitted paths.
++	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, path, entry.Size)
+ 
+ 	if entry.Proto != "" {
+-		s.ProtoCounts[entry.Proto]++
++		s.IncStrCount(s.ProtoCounts, entry.Proto)
+ 	}
+ 	if entry.TLSVersion != "" {
+-		s.TLSVersionCounts[entry.TLSVersion]++
++		s.IncStrCount(s.TLSVersionCounts, entry.TLSVersion)
+ 	} else {
+-		s.TLSVersionCounts["Plain HTTP"]++
++		s.IncStrCount(s.TLSVersionCounts, "Plain HTTP")
+ 	}
+ 
+ 	if entry.IsBot {
+@@ -180,18 +189,24 @@ func (e *Engine) Process(entry *types.LogEntry) {
+ 
+ 	if entry.RemoteIP != "" {
+ 		s.IncStrCount(s.RemoteIPCounts, entry.RemoteIP)
+-		s.AddStrBytes(s.IPBytesMap, entry.RemoteIP, entry.Size)
++		s.AddStrBytesFor(s.RemoteIPCounts, s.IPBytesMap, entry.RemoteIP, entry.Size)
+ 	}
+ 
+ 	if entry.Geo.CountryCode != "" {
+-		s.IncStrCount(s.CountryCounts, entry.Geo.CountryCode)
+-		if entry.Geo.CountryName != "" {
+-			s.CountryNames[entry.Geo.CountryCode] = entry.Geo.CountryName
++		// Country name is a companion of CountryCounts.
++		if s.IncStrCount(s.CountryCounts, entry.Geo.CountryCode) && entry.Geo.CountryName != "" {
++			types.SetValueFor(s.CountryCounts, s.CountryNames, entry.Geo.CountryCode, entry.Geo.CountryName)
+ 		}
+ 	}
+ 	if entry.Geo.City != "" {
+-		s.IncStrCount(s.CityCounts, entry.Geo.City)
+-		s.CityLocations[entry.Geo.City] = types.GeoLocation{Latitude: entry.Geo.Latitude, Longitude: entry.Geo.Longitude, Timezone: entry.Geo.Timezone}
++		// City location is a companion of CityCounts.
++		if s.IncStrCount(s.CityCounts, entry.Geo.City) {
++			types.SetValueFor(s.CityCounts, s.CityLocations, entry.Geo.City, types.GeoLocation{
++				Latitude:  entry.Geo.Latitude,
++				Longitude: entry.Geo.Longitude,
++				Timezone:  entry.Geo.Timezone,
++			})
++		}
+ 	}
+ 	if entry.Geo.ASN > 0 {
+ 		s.IncStrCount(s.ASNCounts, fmt.Sprintf("AS%d", entry.Geo.ASN))
+@@ -199,7 +214,7 @@ func (e *Engine) Process(entry *types.LogEntry) {
+ 
+ 	if entry.Status >= 500 {
+ 		s.Errors++
+-		s.IncStrCount(s.PathErrorCounts, entry.Path())
++		s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, path)
+ 	}
+ 	switch {
+ 	case entry.Status >= 200 && entry.Status < 300:
+diff --git a/pkg/analysis/cardinality_test.go b/pkg/analysis/cardinality_test.go
+new file mode 100644
+index 0000000..9424d32
+--- /dev/null
++++ b/pkg/analysis/cardinality_test.go
+@@ -0,0 +1,281 @@
++package analysis
++
++import (
++	"testing"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++// newCappedEngine builds an engine whose every string-keyed dimension shares
++// the given MaxCardinality, optionally with the detector enabled.
++func newCappedEngine(maxCard int, detect bool) *Engine {
++	e := New(types.Filters{})
++	e.Stats().MaxCardinality = maxCard
++	if detect {
++		e.SetDetector(NewDetector())
++	}
++	return e
++}
++
++func keys(m map[string]int64) map[string]bool {
++	out := make(map[string]bool, len(m))
++	for k := range m {
++		out[k] = true
++	}
++	return out
++}
++
++// TestMaxCardinalityPathDimensionSharedAdmission verifies that path counts,
++// path bytes and path error counts share one admission decision; rejected
++// keys create no orphan companions, admitted keys keep accumulating, and the
++// global request/byte/error counters stay exact.
++func TestMaxCardinalityPathDimensionSharedAdmission(t *testing.T) {
++	e := newCappedEngine(2, false)
++	entries := []*types.LogEntry{
++		{Method: "GET", URI: "/a", Host: "h", RemoteIP: "1.1.1.1", Status: 200, Size: 100},
++		{Method: "GET", URI: "/b", Host: "h", RemoteIP: "1.1.1.1", Status: 500, Size: 200},
++		{Method: "GET", URI: "/c", Host: "h", RemoteIP: "1.1.1.1", Status: 500, Size: 300}, // rejected path, 5xx
++		{Method: "GET", URI: "/d", Host: "h", RemoteIP: "1.1.1.1", Status: 200, Size: 400}, // rejected path
++		{Method: "GET", URI: "/a", Host: "h", RemoteIP: "1.1.1.1", Status: 500, Size: 50},  // admitted key keeps accumulating
++	}
++	for _, en := range entries {
++		e.Process(en)
++	}
++	s := e.Stats()
++
++	if s.TotalRequests != 5 {
++		t.Errorf("TotalRequests = %d, want 5", s.TotalRequests)
++	}
++	if s.TotalBytes != 1050 {
++		t.Errorf("TotalBytes = %d, want 1050 (global bytes must stay exact)", s.TotalBytes)
++	}
++	if s.Errors != 3 || s.Status5xx != 3 {
++		t.Errorf("Errors = %d, Status5xx = %d, want 3/3", s.Errors, s.Status5xx)
++	}
++	if len(s.PathCounts) != 2 {
++		t.Fatalf("PathCounts len = %d, want 2: %v", len(s.PathCounts), s.PathCounts)
++	}
++	if s.PathCounts["/a"] != 2 || s.PathCounts["/b"] != 1 {
++		t.Errorf("admitted paths must keep accumulating: %v", s.PathCounts)
++	}
++	if _, ok := s.PathCounts["/c"]; ok || s.PathCounts["/d"] != 0 {
++		t.Error("rejected new paths must not be admitted, nor evict old keys")
++	}
++	// Companion maps stay in lockstep with the primary dimension.
++	if len(s.PathBytesMap) != 2 {
++		t.Errorf("PathBytesMap len = %d, want 2", len(s.PathBytesMap))
++	}
++	if s.PathBytesMap["/a"] != 150 || s.PathBytesMap["/b"] != 200 {
++		t.Errorf("path bytes for admitted paths wrong: %v", s.PathBytesMap)
++	}
++	if len(s.PathErrorCounts) != 2 {
++		t.Errorf("PathErrorCounts len = %d, want 2 (rejected /c must be absent)", len(s.PathErrorCounts))
++	}
++	if s.PathErrorCounts["/a"] != 1 || s.PathErrorCounts["/b"] != 1 {
++		t.Errorf("PathErrorCounts = %v", s.PathErrorCounts)
++	}
++	paths := keys(s.PathCounts)
++	for k := range s.PathBytesMap {
++		if !paths[k] {
++			t.Errorf("orphan byte entry %q without parent PathCounts", k)
++		}
++	}
++	for k := range s.PathErrorCounts {
++		if !paths[k] {
++			t.Errorf("orphan error entry %q without parent PathCounts", k)
++		}
++	}
++}
++
++// TestMaxCardinalityIPDimensionSharedAdmission covers the IP counter and its
++// byte companion.
++func TestMaxCardinalityIPDimensionSharedAdmission(t *testing.T) {
++	e := newCappedEngine(2, false)
++	for _, en := range []*types.LogEntry{
++		{URI: "/", Status: 200, Size: 10, RemoteIP: "1.1.1.1"},
++		{URI: "/", Status: 200, Size: 20, RemoteIP: "2.2.2.2"},
++		{URI: "/", Status: 200, Size: 30, RemoteIP: "3.3.3.3"}, // rejected
++		{URI: "/", Status: 200, Size: 40, RemoteIP: "1.1.1.1"}, // existing
++	} {
++		e.Process(en)
++	}
++	s := e.Stats()
++	if len(s.RemoteIPCounts) != 2 || s.RemoteIPCounts["1.1.1.1"] != 2 {
++		t.Errorf("RemoteIPCounts = %v", s.RemoteIPCounts)
++	}
++	if len(s.IPBytesMap) != 2 || s.IPBytesMap["1.1.1.1"] != 50 || s.IPBytesMap["2.2.2.2"] != 20 {
++		t.Errorf("IPBytesMap = %v", s.IPBytesMap)
++	}
++	if _, ok := s.IPBytesMap["3.3.3.3"]; ok {
++		t.Error("rejected IP must not create a byte entry")
++	}
++}
++
++// TestMaxCardinalityGeoCompanions verifies country names and city locations
++// cannot outgrow their primary counter.
++func TestMaxCardinalityGeoCompanions(t *testing.T) {
++	e := newCappedEngine(1, false)
++	for _, en := range []*types.LogEntry{
++		{URI: "/", Status: 200, Geo: types.GeoInfo{CountryCode: "US", CountryName: "United States", City: "New York", Latitude: 40.7}},
++		{URI: "/", Status: 200, Geo: types.GeoInfo{CountryCode: "DE", CountryName: "Germany", City: "Berlin", Latitude: 52.5}},
++		{URI: "/", Status: 200, Geo: types.GeoInfo{CountryCode: "IT", CountryName: "Italy", City: "Rome", Latitude: 41.9}},
++	} {
++		e.Process(en)
++	}
++	s := e.Stats()
++	if len(s.CountryCounts) != 1 || len(s.CountryNames) != 1 {
++		t.Errorf("country dimension = counts %d names %d, want 1/1", len(s.CountryCounts), len(s.CountryNames))
++	}
++	if s.CountryNames["US"] != "United States" {
++		t.Errorf("admitted country name missing: %v", s.CountryNames)
++	}
++	for code := range s.CountryNames {
++		if _, ok := s.CountryCounts[code]; !ok {
++			t.Errorf("orphan country name %q without parent count", code)
++		}
++	}
++	if len(s.CityCounts) != 1 || len(s.CityLocations) != 1 {
++		t.Errorf("city dimension = counts %d locations %d, want 1/1", len(s.CityCounts), len(s.CityLocations))
++	}
++	if s.CityLocations["New York"].Latitude != 40.7 {
++		t.Errorf("admitted city location missing: %v", s.CityLocations)
++	}
++	for city := range s.CityLocations {
++		if _, ok := s.CityCounts[city]; !ok {
++			t.Errorf("orphan city location %q without parent count", city)
++		}
++	}
++}
++
++// TestMaxCardinalityProtoAndTLS covers the two dimensions that previously
++// bypassed the cap via direct map writes.
++func TestMaxCardinalityProtoAndTLS(t *testing.T) {
++	e := newCappedEngine(1, false)
++	for _, en := range []*types.LogEntry{
++		{URI: "/", Status: 200, Proto: "HTTP/1.1", TLSVersion: "TLS 1.2"},
++		{URI: "/", Status: 200, Proto: "HTTP/2.0", TLSVersion: "TLS 1.3"},
++		{URI: "/", Status: 200, Proto: "HTTP/3.0"}, // plain HTTP fallback key
++	} {
++		e.Process(en)
++	}
++	s := e.Stats()
++	if len(s.ProtoCounts) != 1 {
++		t.Errorf("ProtoCounts = %v, want exactly 1 admitted protocol", s.ProtoCounts)
++	}
++	if len(s.TLSVersionCounts) != 1 {
++		t.Errorf("TLSVersionCounts = %v, want exactly 1 admitted TLS value", s.TLSVersionCounts)
++	}
++}
++
++// TestMaxCardinalitySuspiciousDetails verifies detection detail companions
++// share the SuspiciousIPs admission decision.
++func TestMaxCardinalitySuspiciousDetails(t *testing.T) {
++	e := newCappedEngine(3, true)
++	for i, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"} {
++		e.Process(&types.LogEntry{
++			Method:     "GET",
++			URI:        "/?id=" + string(rune('a'+i)) + " UNION SELECT username,password FROM users",
++			Status:     200,
++			RemoteIP:   ip,
++			RemoteAddr: ip + ":1234",
++		})
++	}
++	s := e.Stats()
++	if len(s.SuspiciousIPs) != 3 {
++		t.Fatalf("SuspiciousIPs len = %d, want 3: %v", len(s.SuspiciousIPs), s.SuspiciousIPs)
++	}
++	if len(s.SuspiciousDetails) != 3 {
++		t.Errorf("SuspiciousDetails len = %d, want 3", len(s.SuspiciousDetails))
++	}
++	if len(s.SuspiciousDetections) != 3 {
++		t.Errorf("SuspiciousDetections len = %d, want 3", len(s.SuspiciousDetections))
++	}
++	parents := keys(s.SuspiciousIPs)
++	for ip := range s.SuspiciousDetails {
++		if !parents[ip] {
++			t.Errorf("orphan detection detail for IP %q without SuspiciousIPs parent", ip)
++		}
++	}
++	for ip := range s.SuspiciousDetections {
++		if !parents[ip] {
++			t.Errorf("orphan detection record for IP %q without SuspiciousIPs parent", ip)
++		}
++	}
++	if _, ok := s.SuspiciousDetails["4.4.4.4"]; ok {
++		t.Error("rejected suspicious IP must not carry details")
++	}
++}
++
++// TestMaxCardinalityInterleavedHTTPAndOperational drives both engines with
++// interleaved HTTP and operational entries and asserts both caps hold while
++// their global totals stay exact.
++func TestMaxCardinalityInterleavedHTTPAndOperational(t *testing.T) {
++	httpEng := newCappedEngine(2, false)
++	opEng := NewOperationalEngine(types.Filters{})
++	opEng.Stats().MaxCardinality = 2
++
++	for i := 0; i < 5; i++ {
++		httpEng.Process(&types.LogEntry{
++			URI:    "/p" + string(rune('0'+i)),
++			Status: 200,
++			Size:   int64(10 + i),
++		})
++		opEng.Process(&types.OperationalEntry{
++			Level:  "info",
++			Logger: "tls",
++			Msg:    "message-" + string(rune('0'+i)),
++		})
++	}
++	hs := httpEng.Stats()
++	os := opEng.Stats()
++	if hs.TotalRequests != 5 || hs.TotalBytes != 60 {
++		t.Errorf("HTTP globals wrong: requests=%d bytes=%d", hs.TotalRequests, hs.TotalBytes)
++	}
++	if len(hs.PathCounts) != 2 || len(hs.PathBytesMap) != 2 {
++		t.Errorf("HTTP dimension not capped: paths=%d bytes=%d", len(hs.PathCounts), len(hs.PathBytesMap))
++	}
++	if os.TotalEvents != 5 {
++		t.Errorf("operational TotalEvents = %d, want 5", os.TotalEvents)
++	}
++	if len(os.MsgCounts) != 2 {
++		t.Errorf("MsgCounts len = %d, want 2", len(os.MsgCounts))
++	}
++	if os.LoggerCounts["tls"] != 5 {
++		t.Errorf("admitted logger must keep accumulating: %v", os.LoggerCounts)
++	}
++}
++
++// TestOperationalEngineMaxCardinality covers the level/logger/message maps
++// directly, including the 0 = unlimited default.
++func TestOperationalEngineMaxCardinality(t *testing.T) {
++	eng := NewOperationalEngine(types.Filters{})
++	eng.Stats().MaxCardinality = 2
++	for _, en := range []*types.OperationalEntry{
++		{Level: "info", Logger: "tls", Msg: "m1"},
++		{Level: "error", Logger: "http", Msg: "m2"},
++		{Level: "warn", Logger: "admin", Msg: "m3"},
++		{Level: "info", Logger: "tls", Msg: "m4"},
++		{Level: "info", Logger: "tls", Msg: "m1"},
++	} {
++		eng.Process(en)
++	}
++	s := eng.Stats()
++	if s.TotalEvents != 5 || s.Errors != 1 {
++		t.Errorf("global operational totals must stay exact: events=%d errors=%d", s.TotalEvents, s.Errors)
++	}
++	if len(s.LevelCounts) != 2 || len(s.LoggerCounts) != 2 || len(s.MsgCounts) != 2 {
++		t.Errorf("operational dimensions not capped: levels=%d loggers=%d msgs=%d",
++			len(s.LevelCounts), len(s.LoggerCounts), len(s.MsgCounts))
++	}
++	if s.LoggerCounts["tls"] != 3 {
++		t.Errorf("admitted logger must accumulate: %v", s.LoggerCounts)
++	}
++
++	unlimited := NewOperationalEngine(types.Filters{})
++	for i := 0; i < 50; i++ {
++		unlimited.Process(&types.OperationalEntry{Level: "info", Logger: "l", Msg: "m" + string(rune('A'+i%26)) + string(rune('a'+i/26))})
++	}
++	if len(unlimited.Stats().MsgCounts) != 50 {
++		t.Errorf("MaxCardinality=0 must stay unlimited, got %d keys", len(unlimited.Stats().MsgCounts))
++	}
++}
+diff --git a/pkg/analysis/operational.go b/pkg/analysis/operational.go
+index 65ace5c..d30f94d 100644
+--- a/pkg/analysis/operational.go
++++ b/pkg/analysis/operational.go
+@@ -43,9 +43,12 @@ func (e *OperationalEngine) Process(entry *types.OperationalEntry) {
+ 	}
+ 
+ 	lvl := entry.EffectiveLevel()
+-	s.LevelCounts[lvl]++
+-	s.LoggerCounts[entry.Logger]++
+-	s.MsgCounts[entry.Msg]++
++	// Every operational string dimension (level, logger, message text)
++	// goes through the same cardinality gate as the HTTP counters. Global
++	// TotalEvents/Errors stay exact regardless of admission.
++	s.IncStrCount(s.LevelCounts, lvl)
++	s.IncStrCount(s.LoggerCounts, entry.Logger)
++	s.IncStrCount(s.MsgCounts, entry.Msg)
+ 	if lvl == "error" {
+ 		s.Errors++
+ 	}
+diff --git a/pkg/guard/cardinality_test.go b/pkg/guard/cardinality_test.go
+new file mode 100644
+index 0000000..f25582e
+--- /dev/null
++++ b/pkg/guard/cardinality_test.go
+@@ -0,0 +1,52 @@
++package guard
++
++import (
++	"context"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/lenny-ts/caddy-analyzer/pkg/types"
++)
++
++// TestGuardCardinalityAppliedAndKeptAfterTick verifies the global
++// --max-cardinality setting reaches the guard's per-window analysis engine
++// and is applied again to the rebuilt engine after the tick reset, while
++// global request totals stay exact.
++func TestGuardCardinalityAppliedAndKeptAfterTick(t *testing.T) {
++	g := New(Config{Window: time.Minute, Blocker: newFakeBlocker(), MaxCardinality: 50})
++	if got := g.Engine().Stats().MaxCardinality; got != 50 {
++		t.Fatalf("engine cap after New = %d, want 50", got)
++	}
++	for i := 0; i < 75; i++ {
++		g.Engine().Process(&types.LogEntry{URI: "/p" + strconv.Itoa(i), Status: 200})
++	}
++	s := g.Engine().Stats()
++	if got := len(s.PathCounts); got != 50 {
++		t.Errorf("PathCounts = %d keys, want 50", got)
++	}
++	if s.TotalRequests != 75 {
++		t.Errorf("TotalRequests = %d, want 75", s.TotalRequests)
++	}
++
++	// Tick resets the window: the rebuilt engine must carry the same cap
++	// and start with fresh capacity.
++	g.Tick(context.Background())
++	rs := g.Engine().Stats()
++	if got := rs.MaxCardinality; got != 50 {
++		t.Fatalf("engine cap after Tick = %d, want 50", got)
++	}
++	if got := len(rs.PathCounts); got != 0 {
++		t.Errorf("fresh window must start empty, got %d keys", got)
++	}
++}
++
++// TestGuardZeroCardinalityLeavesEngineUnlimited preserves the zero-value
++// Config behavior for library callers/tests (0 = unlimited engine, detector
++// keeps its own built-in LRU cap).
++func TestGuardZeroCardinalityLeavesEngineUnlimited(t *testing.T) {
++	g := New(Config{Window: time.Minute, Blocker: newFakeBlocker()})
++	if got := g.Engine().Stats().MaxCardinality; got != 0 {
++		t.Errorf("zero Config value must leave engine unlimited, got %d", got)
++	}
++}
+diff --git a/pkg/guard/guard.go b/pkg/guard/guard.go
+index 4d2720c..095441d 100644
+--- a/pkg/guard/guard.go
++++ b/pkg/guard/guard.go
+@@ -213,7 +213,13 @@ type Config struct {
+ 	AnomalyFactor       float64
+ 	UARotationThreshold int
+ 	CredStuffingLimit   int
+-	CustomPatterns      []analysis.DetectionPattern
++	// MaxCardinality caps distinct log-derived keys in the per-window
++	// analysis engine and the detector IP working set. The guard resets
++	// both every tick, but a very busy window must still stay bounded by
++	// the global --max-cardinality option. 0 leaves the engine unlimited
++	// (it is reset each window) and keeps the detector's built-in LRU cap.
++	MaxCardinality  int
++	CustomPatterns  []analysis.DetectionPattern
+ 	// Blocker is an optional firewall blocker. If nil, the real
+ 	// iptables blocker is used. Tests should provide a fake blocker
+ 	// so that loadState cleanup hits the fake, not real iptables.
+@@ -533,6 +539,7 @@ func New(cfg Config) *Guard {
+ 	if cfg.UARotationThreshold > 0 {
+ 		g.detector.SetUARotationThreshold(cfg.UARotationThreshold)
+ 	}
++	g.applyCardinality()
+ 	for _, s := range cfg.SelfIPs {
+ 		if ip := net.ParseIP(s); ip != nil {
+ 			g.selfIPs = append(g.selfIPs, ip)
+@@ -557,6 +564,21 @@ func New(cfg Config) *Guard {
+ 	return g
+ }
+ 
++// applyCardinality wires the configured MaxCardinality into a freshly built
++// engine/detector pair. Both New and the per-tick reset call it so a rebuilt
++// window keeps the same configured limit. A positive value bounds both the
++// engine dimensions and the detector IP working set; zero leaves the engine
++// unlimited (it is reset every tick anyway) and keeps the detector's built-in
++// LRU safety cap, so zero-value Config callers keep the old behavior.
++func (g *Guard) applyCardinality() {
++	if g.engine != nil {
++		g.engine.Stats().MaxCardinality = g.cfg.MaxCardinality
++	}
++	if g.detector != nil && g.cfg.MaxCardinality > 0 {
++		g.detector.SetIPCap(g.cfg.MaxCardinality)
++	}
++}
++
+ func parseCIDRList(list []string) []*net.IPNet {
+ 	var nets []*net.IPNet
+ 	for _, s := range list {
+@@ -1035,7 +1057,9 @@ func (g *Guard) Tick(ctx context.Context) []Candidate {
+ 	if g.cfg.UARotationThreshold > 0 {
+ 		g.detector.SetUARotationThreshold(g.cfg.UARotationThreshold)
+ 	}
++	g.applyCardinality()
+ 	g.engine = analysis.New(types.Filters{})
++	g.engine.Stats().MaxCardinality = g.cfg.MaxCardinality
+ 	g.engine.Stats().StartTime = now
+ 	g.detectCounts = make(map[string]int)
+ 	g.mu.Unlock()
+diff --git a/pkg/tui/dashboard.go b/pkg/tui/dashboard.go
+index 33814f6..96d0f1d 100644
+--- a/pkg/tui/dashboard.go
++++ b/pkg/tui/dashboard.go
+@@ -58,6 +58,11 @@ type Model struct {
+ 	uaItems      []types.CountItem
+ 
+ 	geoip *enrich.GeoIP
++
++	// maxCard is the global --max-cardinality setting carried into every
++	// engine built for this dashboard, including engines created by the
++	// manual [r] reset and the 5-minute auto reset. 0 = unlimited.
++	maxCard int
+ }
+ 
+ var (
+@@ -90,21 +95,47 @@ func NewModelWithGeoIP(linesCh chan string, g *enrich.GeoIP) Model {
+ }
+ 
+ func NewModelWithGeoIPAndPatterns(linesCh chan string, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
+-	det := analysis.NewDetectorWithPatterns(custom)
+-	eng := analysis.New(types.Filters{})
+-	eng.SetDetector(det)
+-	opEng := analysis.NewOperationalEngine(types.Filters{})
+-
+-	return Model{
+-		engine:      eng,
+-		opEngine:    opEng,
+-		detector:    det,
++	m := Model{
++		detector:    analysis.NewDetectorWithPatterns(custom),
+ 		linesCh:     linesCh,
+ 		current:     viewSummary,
+ 		recentLogs:  make([]*types.LogEntry, 0, 20),
+ 		windowStart: time.Now(),
+ 		geoip:       g,
+ 	}
++	m.engine, m.opEngine = m.newWindowEngines()
++	return m
++}
++
++// newWindowEngines builds a fresh HTTP/operational engine pair for a
++// dashboard window, carrying the configured cardinality limit. The initial
++// model, the manual [r] reset and the 5-minute auto reset all go through
++// here, so a rebuilt window gets fresh map capacity but can never silently
++// drop the configured cap. The detector is intentionally shared with the
++// previous window.
++func (m Model) newWindowEngines() (*analysis.Engine, *analysis.OperationalEngine) {
++	eng := analysis.New(types.Filters{})
++	eng.Stats().MaxCardinality = m.maxCard
++	eng.SetDetector(m.detector)
++	opEng := analysis.NewOperationalEngine(types.Filters{})
++	opEng.Stats().MaxCardinality = m.maxCard
++	return eng, opEng
++}
++
++// SetMaxCardinality propagates the global --max-cardinality option to the
++// dashboard's engines and detector. Call it before Run; later resets reuse
++// the stored value. 0 means unlimited.
++func (m *Model) SetMaxCardinality(n int) {
++	m.maxCard = n
++	if m.engine != nil {
++		m.engine.Stats().MaxCardinality = n
++	}
++	if m.opEngine != nil {
++		m.opEngine.Stats().MaxCardinality = n
++	}
++	if m.detector != nil {
++		m.detector.SetIPCap(n)
++	}
+ }
+ 
+ func (m Model) Init() tea.Cmd {
+@@ -172,10 +203,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 			m.current = (m.current + viewOperational) % (viewOperational + 1)
+ 			m = m.refreshTables()
+ 		case "r":
+-			eng := analysis.New(types.Filters{})
+-			eng.SetDetector(m.detector)
+-			m.engine = eng
+-			m.opEngine = analysis.NewOperationalEngine(types.Filters{})
++			m.engine, m.opEngine = m.newWindowEngines()
+ 			m.stats = nil
+ 			m.recentLogs = make([]*types.LogEntry, 0, 20)
+ 			m.recentOps = nil
+@@ -215,12 +243,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 
+ 	case TickMsg:
+ 		// Auto-reset the engine every 5 minutes so the dashboard does not
+-		// accumulate unbounded maps over multi-hour sessions.
++		// accumulate unbounded maps over multi-hour sessions. The rebuilt
++		// window keeps the configured cardinality limit.
+ 		if time.Since(m.windowStart) > 5*time.Minute {
+-			eng := analysis.New(types.Filters{})
+-			eng.SetDetector(m.detector)
+-			m.engine = eng
+-			m.opEngine = analysis.NewOperationalEngine(types.Filters{})
++			m.engine, m.opEngine = m.newWindowEngines()
+ 			m.stats = nil
+ 			m.recentLogs = make([]*types.LogEntry, 0, 20)
+ 			m.recentOps = nil
+diff --git a/pkg/tui/dashboard_test.go b/pkg/tui/dashboard_test.go
+index afb1db2..19a09ff 100644
+--- a/pkg/tui/dashboard_test.go
++++ b/pkg/tui/dashboard_test.go
+@@ -395,3 +395,67 @@ func TestViewGeoRendersDisabledHint(t *testing.T) {
+ 		t.Errorf("Geo tab must render a disabled hint without an enricher, got %q", out)
+ 	}
+ }
++
++// lineWithPath returns the sample Caddy log line with its request URI
++// rewritten to path.
++func lineWithPath(path string) string {
++	return strings.Replace(sampleCaddyLine, "/search?q=test", path, 1)
++}
++
++// TestMaxCardinalityAppliesAndSurvivesResets verifies the global
++// --max-cardinality setting reaches the dashboard engines, bounds the HTTP
++// dimensions while global counters stay exact, and is retained (with fresh
++// window capacity) after the manual [r] reset and the 5-minute auto reset.
++func TestMaxCardinalityAppliesAndSurvivesResets(t *testing.T) {
++	m := NewModel(make(chan string, 1))
++	m.SetMaxCardinality(3)
++	m.ready = true
++	m = m.initTables()
++	if m.engine.Stats().MaxCardinality != 3 || m.opEngine.Stats().MaxCardinality != 3 {
++		t.Fatalf("SetMaxCardinality must configure both engines")
++	}
++
++	feed := func(um Model, paths ...string) Model {
++		for _, p := range paths {
++			upd, _ := um.Update(LineMsg(lineWithPath(p)))
++			um = upd.(Model)
++		}
++		return um
++	}
++	m = feed(m, "/p1", "/p2", "/p3", "/p4")
++	s := m.engine.Stats()
++	if s.TotalRequests != 4 {
++		t.Errorf("TotalRequests = %d, want 4", s.TotalRequests)
++	}
++	if len(s.PathCounts) != 3 {
++		t.Errorf("PathCounts len = %d, want 3", len(s.PathCounts))
++	}
++	if len(s.PathBytesMap) != 3 {
++		t.Errorf("PathBytesMap len = %d, want 3 (companion of path dimension)", len(s.PathBytesMap))
++	}
++
++	// Manual reset: same configuration, fresh window capacity.
++	upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
++	m = upd.(Model)
++	if m.engine.Stats().MaxCardinality != 3 || m.opEngine.Stats().MaxCardinality != 3 {
++		t.Fatal("manual reset must keep the configured cardinality limit")
++	}
++	if len(m.engine.Stats().PathCounts) != 0 {
++		t.Error("manual reset must give the new window fresh (empty) capacity")
++	}
++	m = feed(m, "/n1", "/n2")
++	if len(m.engine.Stats().PathCounts) != 2 {
++		t.Errorf("fresh window admitted keys = %d, want 2", len(m.engine.Stats().PathCounts))
++	}
++
++	// Auto reset triggered by an aged window: same configuration, fresh maps.
++	m.windowStart = time.Now().Add(-6 * time.Minute)
++	upd, _ = m.Update(TickMsg(time.Now()))
++	m = upd.(Model)
++	if m.engine.Stats().MaxCardinality != 3 {
++		t.Error("auto reset must keep the configured cardinality limit")
++	}
++	if len(m.engine.Stats().PathCounts) != 0 {
++		t.Error("auto reset must give the new window fresh (empty) capacity")
++	}
++}
+diff --git a/pkg/types/types.go b/pkg/types/types.go
+index af6ecd7..12e37f4 100644
+--- a/pkg/types/types.go
++++ b/pkg/types/types.go
+@@ -351,11 +351,15 @@ type Stats struct {
+ 	Status4xx       int64
+ 	Status5xx       int64
+ 
+-	// MaxCardinality bounds the number of distinct keys tracked in the
+-	// string-keyed counters (PathCounts, HostCounts, RemoteIPCounts,
+-	// UserAgentCounts, ...). 0 = unlimited. When the cap is reached, new
+-	// keys are dropped (existing keys keep accumulating) so memory is
+-	// bounded on huge-cardinality logs.
++	// MaxCardinality bounds the number of distinct keys tracked in EVERY
++	// string-keyed dimension derived from log content (paths, hosts,
++	// addresses, IPs, UAs, protocols, TLS versions, bots, referers,
++	// countries, ASNs, cities, suspicious IPs, ...). 0 = unlimited. When
++	// the cap is reached for a dimension, new keys are dropped (existing
++	// keys keep accumulating) so memory is bounded on huge-cardinality
++	// logs. Companion state of the same dimension (per-key bytes, error
++	// counts, country names, city locations, detection details) shares one
++	// admission decision and can never outgrow its primary counter.
+ 	MaxCardinality int
+ 
+ 	SuspiciousIPs        map[string]int64
+@@ -436,22 +440,37 @@ func NewStats() *Stats {
+ 	}
+ }
+ 
+-// IncStrCount increments a string-keyed counter, respecting MaxCardinality.
+-// New keys are dropped once the cap is reached; existing keys always increment.
+-func (s *Stats) IncStrCount(m map[string]int64, key string) {
++// IncStrCount increments a string-keyed dimension counter, respecting
++// MaxCardinality. New keys are dropped once the cap is reached; existing
++// keys always increment. It returns true when the key is tracked after the
++// call (an existing key, or a newly admitted one); callers gate companion
++// state (bytes, errors, names, locations, details) on this single admission
++// decision so a rejected key can never create orphan companion entries.
++func (s *Stats) IncStrCount(m map[string]int64, key string) bool {
+ 	if _, ok := m[key]; ok {
+ 		m[key]++
+-		return
++		return true
+ 	}
+ 	if s.MaxCardinality > 0 && len(m) >= s.MaxCardinality {
+-		return
++		return false
+ 	}
+ 	m[key] = 1
++	return true
+ }
+ 
+-// AddStrBytes adds bytes to a string-keyed byte counter, respecting
+-// MaxCardinality. New keys are dropped once the cap is reached; existing
+-// keys always accumulate.
++// IncStrCountFor increments a companion counter of a dimension (e.g. the
++// per-path 5xx count beside PathCounts) only when key is already tracked
++// by the dimension's primary counter. It never admits a new key itself.
++func (s *Stats) IncStrCountFor(primary, m map[string]int64, key string) {
++	if _, ok := primary[key]; ok {
++		m[key]++
++	}
++}
++
++// AddStrBytes adds bytes to a standalone string-keyed byte counter,
++// respecting MaxCardinality. New keys are dropped once the cap is reached;
++// existing keys always accumulate. Prefer AddStrBytesFor for byte maps that
++// accompany a dimension primary counter, so both share one admission.
+ func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
+ 	if _, ok := m[key]; ok {
+ 		m[key] += n
+@@ -463,6 +482,25 @@ func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
+ 	m[key] = n
+ }
+ 
++// AddStrBytesFor adds bytes to a dimension's byte companion (e.g.
++// PathBytesMap beside PathCounts) only when key is already tracked by the
++// dimension's primary counter. Bytes for rejected keys are dropped, while
++// global TotalBytes still accumulates for every request.
++func (s *Stats) AddStrBytesFor(primary, m map[string]int64, key string, n int64) {
++	if _, ok := primary[key]; ok {
++		m[key] += n
++	}
++}
++
++// SetValueFor records a value companion of a dimension (e.g. a country name
++// beside CountryCounts, or a city location beside CityCounts) only when key
++// is already tracked by the dimension's primary counter.
++func SetValueFor[V any](primary map[string]int64, m map[string]V, key string, value V) {
++	if _, ok := primary[key]; ok {
++		m[key] = value
++	}
++}
++
+ func (s *Stats) AddDuration(d float64) {
+ 	s.durHist.add(d)
+ }
+@@ -480,11 +518,18 @@ type OperationalStats struct {
+ 	TotalEvents  int64
+ 	LevelCounts  map[string]int64 // info, warn, error, debug
+ 	LoggerCounts map[string]int64 // "tls", "http", "admin", ""
+-	MsgCounts    map[string]int64
++	MsgCounts    map[string]int64 // Caddy operational logger/message text
+ 	StartTime    time.Time
+ 	EndTime      time.Time
+ 	Errors       int64 // count of level == "error"
+ 	ParseErrors  int64
++
++	// MaxCardinality bounds distinct keys per operational counter
++	// (levels, loggers, messages), mirroring Stats.MaxCardinality so
++	// operational log content cannot grow maps without a cap. 0 =
++	// unlimited. Global TotalEvents/Errors always stay accurate; only
++	// per-key breakdowns drop new keys once the cap is reached.
++	MaxCardinality int
+ }
+ 
+ func NewOperationalStats() *OperationalStats {
+@@ -494,3 +539,17 @@ func NewOperationalStats() *OperationalStats {
+ 		MsgCounts:    make(map[string]int64),
+ 	}
+ }
++
++// IncStrCount increments an operational string counter, respecting
++// MaxCardinality. Existing keys always increment; new keys are dropped once
++// the cap is reached.
++func (s *OperationalStats) IncStrCount(m map[string]int64, key string) {
++	if _, ok := m[key]; ok {
++		m[key]++
++		return
++	}
++	if s.MaxCardinality > 0 && len(m) >= s.MaxCardinality {
++		return
++	}
++	m[key] = 1
++}
+diff --git a/pkg/types/types_test.go b/pkg/types/types_test.go
+index 41e2e87..a2f71ed 100644
+--- a/pkg/types/types_test.go
++++ b/pkg/types/types_test.go
+@@ -1,6 +1,9 @@
+ package types
+ 
+-import "testing"
++import (
++	"strconv"
++	"testing"
++)
+ 
+ func TestEffectiveClientIP_NotTrusted(t *testing.T) {
+ 	e := LogEntry{
+@@ -109,17 +112,79 @@ func TestNewStats(t *testing.T) {
+ 
+ func TestIncStrCount(t *testing.T) {
+ 	s := NewStats()
+-	s.IncStrCount(s.PathCounts, "/a")
+-	s.IncStrCount(s.PathCounts, "/a")
++	if !s.IncStrCount(s.PathCounts, "/a") {
++		t.Error("new key under cap must be admitted")
++	}
++	if !s.IncStrCount(s.PathCounts, "/a") {
++		t.Error("existing key must stay admitted after cap reached")
++	}
+ 	if s.PathCounts["/a"] != 2 {
+ 		t.Errorf("expected 2, got %d", s.PathCounts["/a"])
+ 	}
+ 	// cap reached → new key dropped
+ 	s.MaxCardinality = 1
+-	s.IncStrCount(s.PathCounts, "/b")
++	if s.IncStrCount(s.PathCounts, "/b") {
++		t.Error("new key should be dropped when cap reached")
++	}
+ 	if _, ok := s.PathCounts["/b"]; ok {
+ 		t.Error("new key should be dropped when cap reached")
+ 	}
++	// ... and it must not evict the old key.
++	if s.PathCounts["/a"] != 2 {
++		t.Errorf("rejected new key must not evict old key, got %d", s.PathCounts["/a"])
++	}
++}
++
++func TestIncStrCountCompanionsShareAdmission(t *testing.T) {
++	s := NewStats()
++	s.MaxCardinality = 1
++	if !s.IncStrCount(s.PathCounts, "/a") {
++		t.Fatal("/a must be admitted")
++	}
++	// Companion counters/bytes/values follow the primary's admission.
++	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/a")
++	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/a")
++	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/a", 100)
++	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/a", 50)
++	SetValueFor(s.PathCounts, s.CityLocations, "/a", GeoLocation{Latitude: 1})
++	if s.PathErrorCounts["/a"] != 2 || s.PathBytesMap["/a"] != 150 {
++		t.Errorf("companion state for admitted key missing: errs=%d bytes=%d", s.PathErrorCounts["/a"], s.PathBytesMap["/a"])
++	}
++	// Rejected primary key must not create any orphan companion entry.
++	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/b")
++	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/b", 999)
++	SetValueFor(s.PathCounts, s.CityLocations, "/b", GeoLocation{Latitude: 2})
++	if _, ok := s.PathErrorCounts["/b"]; ok {
++		t.Error("PathErrorCounts must not contain rejected key")
++	}
++	if _, ok := s.PathBytesMap["/b"]; ok {
++		t.Error("PathBytesMap must not contain rejected key")
++	}
++	if _, ok := s.CityLocations["/b"]; ok {
++		t.Error("companion value map must not contain rejected key")
++	}
++}
++
++func TestOperationalStatsIncStrCountCap(t *testing.T) {
++	s := NewOperationalStats()
++	s.MaxCardinality = 1
++	s.IncStrCount(s.MsgCounts, "started")
++	s.IncStrCount(s.MsgCounts, "started")
++	s.IncStrCount(s.MsgCounts, "reloaded")
++	if s.MsgCounts["started"] != 2 {
++		t.Errorf("existing key must accumulate, got %d", s.MsgCounts["started"])
++	}
++	if _, ok := s.MsgCounts["reloaded"]; ok {
++		t.Error("new operational key must be dropped after cap")
++	}
++	// 0 keeps the unlimited behavior.
++	s0 := NewOperationalStats()
++	for i := 0; i < 50; i++ {
++		s0.IncStrCount(s0.MsgCounts, "k"+strconv.Itoa(i))
++	}
++	if len(s0.MsgCounts) != 50 {
++		t.Errorf("MaxCardinality=0 must be unlimited, got %d keys", len(s0.MsgCounts))
++	}
+ }
+ 
+ func TestAddStrBytes(t *testing.T) {

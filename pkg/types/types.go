@@ -351,11 +351,15 @@ type Stats struct {
 	Status4xx       int64
 	Status5xx       int64
 
-	// MaxCardinality bounds the number of distinct keys tracked in the
-	// string-keyed counters (PathCounts, HostCounts, RemoteIPCounts,
-	// UserAgentCounts, ...). 0 = unlimited. When the cap is reached, new
-	// keys are dropped (existing keys keep accumulating) so memory is
-	// bounded on huge-cardinality logs.
+	// MaxCardinality bounds the number of distinct keys tracked in EVERY
+	// string-keyed dimension derived from log content (paths, hosts,
+	// addresses, IPs, UAs, protocols, TLS versions, bots, referers,
+	// countries, ASNs, cities, suspicious IPs, ...). 0 = unlimited. When
+	// the cap is reached for a dimension, new keys are dropped (existing
+	// keys keep accumulating) so memory is bounded on huge-cardinality
+	// logs. Companion state of the same dimension (per-key bytes, error
+	// counts, country names, city locations, detection details) shares one
+	// admission decision and can never outgrow its primary counter.
 	MaxCardinality int
 
 	SuspiciousIPs        map[string]int64
@@ -436,22 +440,37 @@ func NewStats() *Stats {
 	}
 }
 
-// IncStrCount increments a string-keyed counter, respecting MaxCardinality.
-// New keys are dropped once the cap is reached; existing keys always increment.
-func (s *Stats) IncStrCount(m map[string]int64, key string) {
+// IncStrCount increments a string-keyed dimension counter, respecting
+// MaxCardinality. New keys are dropped once the cap is reached; existing
+// keys always increment. It returns true when the key is tracked after the
+// call (an existing key, or a newly admitted one); callers gate companion
+// state (bytes, errors, names, locations, details) on this single admission
+// decision so a rejected key can never create orphan companion entries.
+func (s *Stats) IncStrCount(m map[string]int64, key string) bool {
 	if _, ok := m[key]; ok {
 		m[key]++
-		return
+		return true
 	}
 	if s.MaxCardinality > 0 && len(m) >= s.MaxCardinality {
-		return
+		return false
 	}
 	m[key] = 1
+	return true
 }
 
-// AddStrBytes adds bytes to a string-keyed byte counter, respecting
-// MaxCardinality. New keys are dropped once the cap is reached; existing
-// keys always accumulate.
+// IncStrCountFor increments a companion counter of a dimension (e.g. the
+// per-path 5xx count beside PathCounts) only when key is already tracked
+// by the dimension's primary counter. It never admits a new key itself.
+func (s *Stats) IncStrCountFor(primary, m map[string]int64, key string) {
+	if _, ok := primary[key]; ok {
+		m[key]++
+	}
+}
+
+// AddStrBytes adds bytes to a standalone string-keyed byte counter,
+// respecting MaxCardinality. New keys are dropped once the cap is reached;
+// existing keys always accumulate. Prefer AddStrBytesFor for byte maps that
+// accompany a dimension primary counter, so both share one admission.
 func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
 	if _, ok := m[key]; ok {
 		m[key] += n
@@ -461,6 +480,25 @@ func (s *Stats) AddStrBytes(m map[string]int64, key string, n int64) {
 		return
 	}
 	m[key] = n
+}
+
+// AddStrBytesFor adds bytes to a dimension's byte companion (e.g.
+// PathBytesMap beside PathCounts) only when key is already tracked by the
+// dimension's primary counter. Bytes for rejected keys are dropped, while
+// global TotalBytes still accumulates for every request.
+func (s *Stats) AddStrBytesFor(primary, m map[string]int64, key string, n int64) {
+	if _, ok := primary[key]; ok {
+		m[key] += n
+	}
+}
+
+// SetValueFor records a value companion of a dimension (e.g. a country name
+// beside CountryCounts, or a city location beside CityCounts) only when key
+// is already tracked by the dimension's primary counter.
+func SetValueFor[V any](primary map[string]int64, m map[string]V, key string, value V) {
+	if _, ok := primary[key]; ok {
+		m[key] = value
+	}
 }
 
 func (s *Stats) AddDuration(d float64) {
@@ -480,11 +518,18 @@ type OperationalStats struct {
 	TotalEvents  int64
 	LevelCounts  map[string]int64 // info, warn, error, debug
 	LoggerCounts map[string]int64 // "tls", "http", "admin", ""
-	MsgCounts    map[string]int64
+	MsgCounts    map[string]int64 // Caddy operational logger/message text
 	StartTime    time.Time
 	EndTime      time.Time
 	Errors       int64 // count of level == "error"
 	ParseErrors  int64
+
+	// MaxCardinality bounds distinct keys per operational counter
+	// (levels, loggers, messages), mirroring Stats.MaxCardinality so
+	// operational log content cannot grow maps without a cap. 0 =
+	// unlimited. Global TotalEvents/Errors always stay accurate; only
+	// per-key breakdowns drop new keys once the cap is reached.
+	MaxCardinality int
 }
 
 func NewOperationalStats() *OperationalStats {
@@ -493,4 +538,18 @@ func NewOperationalStats() *OperationalStats {
 		LoggerCounts: make(map[string]int64),
 		MsgCounts:    make(map[string]int64),
 	}
+}
+
+// IncStrCount increments an operational string counter, respecting
+// MaxCardinality. Existing keys always increment; new keys are dropped once
+// the cap is reached.
+func (s *OperationalStats) IncStrCount(m map[string]int64, key string) {
+	if _, ok := m[key]; ok {
+		m[key]++
+		return
+	}
+	if s.MaxCardinality > 0 && len(m) >= s.MaxCardinality {
+		return
+	}
+	m[key] = 1
 }

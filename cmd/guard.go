@@ -328,6 +328,7 @@ func runGuard(cmd *cobra.Command, args []string) error {
 		UARotationThreshold: guardUARotation,
 		CustomPatterns:      customPatterns,
 		CredStuffingLimit:   guardCredStuffingLimit,
+		MaxCardinality:      flagMaxCard,
 		BlocklistMgr:        blMgr,
 		BlocklistRefresh:    blocklistRefresh,
 		CountryBlock:        guardCountryBlock,

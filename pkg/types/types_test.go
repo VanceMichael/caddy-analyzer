@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestEffectiveClientIP_NotTrusted(t *testing.T) {
 	e := LogEntry{
@@ -109,16 +112,78 @@ func TestNewStats(t *testing.T) {
 
 func TestIncStrCount(t *testing.T) {
 	s := NewStats()
-	s.IncStrCount(s.PathCounts, "/a")
-	s.IncStrCount(s.PathCounts, "/a")
+	if !s.IncStrCount(s.PathCounts, "/a") {
+		t.Error("new key under cap must be admitted")
+	}
+	if !s.IncStrCount(s.PathCounts, "/a") {
+		t.Error("existing key must stay admitted after cap reached")
+	}
 	if s.PathCounts["/a"] != 2 {
 		t.Errorf("expected 2, got %d", s.PathCounts["/a"])
 	}
 	// cap reached → new key dropped
 	s.MaxCardinality = 1
-	s.IncStrCount(s.PathCounts, "/b")
+	if s.IncStrCount(s.PathCounts, "/b") {
+		t.Error("new key should be dropped when cap reached")
+	}
 	if _, ok := s.PathCounts["/b"]; ok {
 		t.Error("new key should be dropped when cap reached")
+	}
+	// ... and it must not evict the old key.
+	if s.PathCounts["/a"] != 2 {
+		t.Errorf("rejected new key must not evict old key, got %d", s.PathCounts["/a"])
+	}
+}
+
+func TestIncStrCountCompanionsShareAdmission(t *testing.T) {
+	s := NewStats()
+	s.MaxCardinality = 1
+	if !s.IncStrCount(s.PathCounts, "/a") {
+		t.Fatal("/a must be admitted")
+	}
+	// Companion counters/bytes/values follow the primary's admission.
+	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/a")
+	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/a")
+	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/a", 100)
+	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/a", 50)
+	SetValueFor(s.PathCounts, s.CityLocations, "/a", GeoLocation{Latitude: 1})
+	if s.PathErrorCounts["/a"] != 2 || s.PathBytesMap["/a"] != 150 {
+		t.Errorf("companion state for admitted key missing: errs=%d bytes=%d", s.PathErrorCounts["/a"], s.PathBytesMap["/a"])
+	}
+	// Rejected primary key must not create any orphan companion entry.
+	s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, "/b")
+	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, "/b", 999)
+	SetValueFor(s.PathCounts, s.CityLocations, "/b", GeoLocation{Latitude: 2})
+	if _, ok := s.PathErrorCounts["/b"]; ok {
+		t.Error("PathErrorCounts must not contain rejected key")
+	}
+	if _, ok := s.PathBytesMap["/b"]; ok {
+		t.Error("PathBytesMap must not contain rejected key")
+	}
+	if _, ok := s.CityLocations["/b"]; ok {
+		t.Error("companion value map must not contain rejected key")
+	}
+}
+
+func TestOperationalStatsIncStrCountCap(t *testing.T) {
+	s := NewOperationalStats()
+	s.MaxCardinality = 1
+	s.IncStrCount(s.MsgCounts, "started")
+	s.IncStrCount(s.MsgCounts, "started")
+	s.IncStrCount(s.MsgCounts, "reloaded")
+	if s.MsgCounts["started"] != 2 {
+		t.Errorf("existing key must accumulate, got %d", s.MsgCounts["started"])
+	}
+	if _, ok := s.MsgCounts["reloaded"]; ok {
+		t.Error("new operational key must be dropped after cap")
+	}
+	// 0 keeps the unlimited behavior.
+	s0 := NewOperationalStats()
+	for i := 0; i < 50; i++ {
+		s0.IncStrCount(s0.MsgCounts, "k"+strconv.Itoa(i))
+	}
+	if len(s0.MsgCounts) != 50 {
+		t.Errorf("MaxCardinality=0 must be unlimited, got %d keys", len(s0.MsgCounts))
 	}
 }
 

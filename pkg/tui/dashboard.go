@@ -58,6 +58,11 @@ type Model struct {
 	uaItems      []types.CountItem
 
 	geoip *enrich.GeoIP
+
+	// maxCard is the global --max-cardinality setting carried into every
+	// engine built for this dashboard, including engines created by the
+	// manual [r] reset and the 5-minute auto reset. 0 = unlimited.
+	maxCard int
 }
 
 var (
@@ -90,20 +95,46 @@ func NewModelWithGeoIP(linesCh chan string, g *enrich.GeoIP) Model {
 }
 
 func NewModelWithGeoIPAndPatterns(linesCh chan string, g *enrich.GeoIP, custom []analysis.DetectionPattern) Model {
-	det := analysis.NewDetectorWithPatterns(custom)
-	eng := analysis.New(types.Filters{})
-	eng.SetDetector(det)
-	opEng := analysis.NewOperationalEngine(types.Filters{})
-
-	return Model{
-		engine:      eng,
-		opEngine:    opEng,
-		detector:    det,
+	m := Model{
+		detector:    analysis.NewDetectorWithPatterns(custom),
 		linesCh:     linesCh,
 		current:     viewSummary,
 		recentLogs:  make([]*types.LogEntry, 0, 20),
 		windowStart: time.Now(),
 		geoip:       g,
+	}
+	m.engine, m.opEngine = m.newWindowEngines()
+	return m
+}
+
+// newWindowEngines builds a fresh HTTP/operational engine pair for a
+// dashboard window, carrying the configured cardinality limit. The initial
+// model, the manual [r] reset and the 5-minute auto reset all go through
+// here, so a rebuilt window gets fresh map capacity but can never silently
+// drop the configured cap. The detector is intentionally shared with the
+// previous window.
+func (m Model) newWindowEngines() (*analysis.Engine, *analysis.OperationalEngine) {
+	eng := analysis.New(types.Filters{})
+	eng.Stats().MaxCardinality = m.maxCard
+	eng.SetDetector(m.detector)
+	opEng := analysis.NewOperationalEngine(types.Filters{})
+	opEng.Stats().MaxCardinality = m.maxCard
+	return eng, opEng
+}
+
+// SetMaxCardinality propagates the global --max-cardinality option to the
+// dashboard's engines and detector. Call it before Run; later resets reuse
+// the stored value. 0 means unlimited.
+func (m *Model) SetMaxCardinality(n int) {
+	m.maxCard = n
+	if m.engine != nil {
+		m.engine.Stats().MaxCardinality = n
+	}
+	if m.opEngine != nil {
+		m.opEngine.Stats().MaxCardinality = n
+	}
+	if m.detector != nil {
+		m.detector.SetIPCap(n)
 	}
 }
 
@@ -172,10 +203,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.current = (m.current + viewOperational) % (viewOperational + 1)
 			m = m.refreshTables()
 		case "r":
-			eng := analysis.New(types.Filters{})
-			eng.SetDetector(m.detector)
-			m.engine = eng
-			m.opEngine = analysis.NewOperationalEngine(types.Filters{})
+			m.engine, m.opEngine = m.newWindowEngines()
 			m.stats = nil
 			m.recentLogs = make([]*types.LogEntry, 0, 20)
 			m.recentOps = nil
@@ -215,12 +243,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TickMsg:
 		// Auto-reset the engine every 5 minutes so the dashboard does not
-		// accumulate unbounded maps over multi-hour sessions.
+		// accumulate unbounded maps over multi-hour sessions. The rebuilt
+		// window keeps the configured cardinality limit.
 		if time.Since(m.windowStart) > 5*time.Minute {
-			eng := analysis.New(types.Filters{})
-			eng.SetDetector(m.detector)
-			m.engine = eng
-			m.opEngine = analysis.NewOperationalEngine(types.Filters{})
+			m.engine, m.opEngine = m.newWindowEngines()
 			m.stats = nil
 			m.recentLogs = make([]*types.LogEntry, 0, 20)
 			m.recentOps = nil

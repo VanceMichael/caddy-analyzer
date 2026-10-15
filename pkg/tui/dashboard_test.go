@@ -395,3 +395,67 @@ func TestViewGeoRendersDisabledHint(t *testing.T) {
 		t.Errorf("Geo tab must render a disabled hint without an enricher, got %q", out)
 	}
 }
+
+// lineWithPath returns the sample Caddy log line with its request URI
+// rewritten to path.
+func lineWithPath(path string) string {
+	return strings.Replace(sampleCaddyLine, "/search?q=test", path, 1)
+}
+
+// TestMaxCardinalityAppliesAndSurvivesResets verifies the global
+// --max-cardinality setting reaches the dashboard engines, bounds the HTTP
+// dimensions while global counters stay exact, and is retained (with fresh
+// window capacity) after the manual [r] reset and the 5-minute auto reset.
+func TestMaxCardinalityAppliesAndSurvivesResets(t *testing.T) {
+	m := NewModel(make(chan string, 1))
+	m.SetMaxCardinality(3)
+	m.ready = true
+	m = m.initTables()
+	if m.engine.Stats().MaxCardinality != 3 || m.opEngine.Stats().MaxCardinality != 3 {
+		t.Fatalf("SetMaxCardinality must configure both engines")
+	}
+
+	feed := func(um Model, paths ...string) Model {
+		for _, p := range paths {
+			upd, _ := um.Update(LineMsg(lineWithPath(p)))
+			um = upd.(Model)
+		}
+		return um
+	}
+	m = feed(m, "/p1", "/p2", "/p3", "/p4")
+	s := m.engine.Stats()
+	if s.TotalRequests != 4 {
+		t.Errorf("TotalRequests = %d, want 4", s.TotalRequests)
+	}
+	if len(s.PathCounts) != 3 {
+		t.Errorf("PathCounts len = %d, want 3", len(s.PathCounts))
+	}
+	if len(s.PathBytesMap) != 3 {
+		t.Errorf("PathBytesMap len = %d, want 3 (companion of path dimension)", len(s.PathBytesMap))
+	}
+
+	// Manual reset: same configuration, fresh window capacity.
+	upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = upd.(Model)
+	if m.engine.Stats().MaxCardinality != 3 || m.opEngine.Stats().MaxCardinality != 3 {
+		t.Fatal("manual reset must keep the configured cardinality limit")
+	}
+	if len(m.engine.Stats().PathCounts) != 0 {
+		t.Error("manual reset must give the new window fresh (empty) capacity")
+	}
+	m = feed(m, "/n1", "/n2")
+	if len(m.engine.Stats().PathCounts) != 2 {
+		t.Errorf("fresh window admitted keys = %d, want 2", len(m.engine.Stats().PathCounts))
+	}
+
+	// Auto reset triggered by an aged window: same configuration, fresh maps.
+	m.windowStart = time.Now().Add(-6 * time.Minute)
+	upd, _ = m.Update(TickMsg(time.Now()))
+	m = upd.(Model)
+	if m.engine.Stats().MaxCardinality != 3 {
+		t.Error("auto reset must keep the configured cardinality limit")
+	}
+	if len(m.engine.Stats().PathCounts) != 0 {
+		t.Error("auto reset must give the new window fresh (empty) capacity")
+	}
+}

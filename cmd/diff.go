@@ -144,6 +144,9 @@ func processLogFile(ctx context.Context, path string) (*analysis.Engine, error) 
 		return nil, fmt.Errorf("invalid filter flags: %w", err)
 	}
 	engine := analysis.New(filters)
+	// The global cardinality option applies to diff too; huge-cardinality
+	// inputs must not grow the comparison engines without a bound.
+	engine.Stats().MaxCardinality = flagMaxCard
 
 	geoip := newGeoIPEnricher()
 	if geoip != nil {

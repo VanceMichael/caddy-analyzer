@@ -1,0 +1,26 @@
+---
+rubrics:
+- id: 1
+  type: f2p
+  text: 达到配置上限后，路径、主机、客户端地址与 IP、User-Agent、referer、bot、协议、TLS、国家、城市、ASN、字节和错误路径等所有由
+    HTTP 日志产生的字符串键状态都不超过上限，已接纳键继续正确累加。
+- id: 2
+  type: f2p
+  text: 国家名称、城市位置以及按 IP 保存的可疑计数和检测详情只为已接纳的父键保留；父计数被拒绝时不会生成孤立伴随状态，每个已接纳 IP 的既有详情条数限制仍然有效。
+- id: 3
+  type: f2p
+  text: OperationalEngine 的 logger 和 message 维度采用同一配置上限，而 TotalEvents、Errors、level
+    计数与时间范围不因键被拒绝而少算。
+- id: 4
+  type: f2p
+  text: 一次性、follow 和 interval 的初始及后续每一代引擎都继承 max-cardinality；interval 或 follow 窗口重建后容量重新开始，但配置不会退回无限制。
+- id: 5
+  type: f2p
+  text: top 子命令和 watch 仪表盘均执行相同上限，watch 的手动重置与五分钟自动重置仍保留该策略，并同时重置 HTTP 和 operational
+    的本窗口准入状态。
+- id: 6
+  type: p2p
+  text: max-cardinality=0 继续允许无限基数，默认 100000 以及未达到上限时的计数、排序、地理名称、检测信息和现有表格、JSON、CSV、HTML、远端输出保持既有结果。
+- id: 7
+  type: f2p
+  text: HTTP 与 operational 日志交错处理、窗口轮换和 TUI 重置时，所有 map 边界、全局标量、已接纳键累加和重置后的新容量在并发执行下都保持确定且无数据竞争。

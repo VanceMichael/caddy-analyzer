@@ -213,7 +213,13 @@ type Config struct {
 	AnomalyFactor       float64
 	UARotationThreshold int
 	CredStuffingLimit   int
-	CustomPatterns      []analysis.DetectionPattern
+	// MaxCardinality caps distinct log-derived keys in the per-window
+	// analysis engine and the detector IP working set. The guard resets
+	// both every tick, but a very busy window must still stay bounded by
+	// the global --max-cardinality option. 0 leaves the engine unlimited
+	// (it is reset each window) and keeps the detector's built-in LRU cap.
+	MaxCardinality  int
+	CustomPatterns  []analysis.DetectionPattern
 	// Blocker is an optional firewall blocker. If nil, the real
 	// iptables blocker is used. Tests should provide a fake blocker
 	// so that loadState cleanup hits the fake, not real iptables.
@@ -533,6 +539,7 @@ func New(cfg Config) *Guard {
 	if cfg.UARotationThreshold > 0 {
 		g.detector.SetUARotationThreshold(cfg.UARotationThreshold)
 	}
+	g.applyCardinality()
 	for _, s := range cfg.SelfIPs {
 		if ip := net.ParseIP(s); ip != nil {
 			g.selfIPs = append(g.selfIPs, ip)
@@ -555,6 +562,21 @@ func New(cfg Config) *Guard {
 	}
 	g.loadState()
 	return g
+}
+
+// applyCardinality wires the configured MaxCardinality into a freshly built
+// engine/detector pair. Both New and the per-tick reset call it so a rebuilt
+// window keeps the same configured limit. A positive value bounds both the
+// engine dimensions and the detector IP working set; zero leaves the engine
+// unlimited (it is reset every tick anyway) and keeps the detector's built-in
+// LRU safety cap, so zero-value Config callers keep the old behavior.
+func (g *Guard) applyCardinality() {
+	if g.engine != nil {
+		g.engine.Stats().MaxCardinality = g.cfg.MaxCardinality
+	}
+	if g.detector != nil && g.cfg.MaxCardinality > 0 {
+		g.detector.SetIPCap(g.cfg.MaxCardinality)
+	}
 }
 
 func parseCIDRList(list []string) []*net.IPNet {
@@ -1035,7 +1057,9 @@ func (g *Guard) Tick(ctx context.Context) []Candidate {
 	if g.cfg.UARotationThreshold > 0 {
 		g.detector.SetUARotationThreshold(g.cfg.UARotationThreshold)
 	}
+	g.applyCardinality()
 	g.engine = analysis.New(types.Filters{})
+	g.engine.Stats().MaxCardinality = g.cfg.MaxCardinality
 	g.engine.Stats().StartTime = now
 	g.detectCounts = make(map[string]int)
 	g.mu.Unlock()

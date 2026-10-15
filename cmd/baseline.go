@@ -149,12 +149,7 @@ func validateBaselinePath(path string) error {
 }
 
 func analyzeSources(ctx context.Context, sources []types.LogSource, filters types.Filters) (*analysis.Engine, *analysis.OperationalEngine, error) {
-	engine := analysis.New(filters)
-	engine.Stats().MaxCardinality = flagMaxCard
-	if flagDetect {
-		engine.SetDetector(newDetector())
-	}
-	opEngine := analysis.NewOperationalEngine(filters)
+	engine, opEngine := newWindowEngines(filters)
 	geoip := newGeoIPEnricher()
 	if geoip != nil {
 		defer func() { _ = geoip.Close() }()

@@ -205,7 +205,7 @@ func init() {
 	flags.StringVar(&flagGrep, "grep", "", "Search pattern across URI, User-Agent, Remote IP")
 	flags.BoolVarP(&flagCompact, "compact", "c", false, "Compact output mode")
 	flags.BoolVarP(&flagTrustXFF, "trust-forwarded", "", false, "Trust X-Forwarded-For / X-Real-IP for client IP (use behind a reverse proxy/CDN)")
-	flags.IntVarP(&flagMaxCard, "max-cardinality", "", 100000, "Max distinct keys tracked per counter (paths, IPs, UAs). 0 = unlimited. Bounds memory on huge-cardinality logs")
+	flags.IntVarP(&flagMaxCard, "max-cardinality", "", 100000, "Max distinct keys per dimension for HTTP and operational counters (paths, IPs, UAs, protocols, cities, loggers, messages, ...). 0 = unlimited. Bounds memory on huge-cardinality logs")
 	flags.DurationVar(&flagGeoCacheTTL, "geo-cache-ttl", 24*time.Hour,
 		"How long a GeoIP lookup stays cached. 0 disables caching, which is much slower on busy traffic")
 	flags.IntVar(&flagGeoCacheSize, "geo-cache-size", 50000,
@@ -274,7 +274,29 @@ func loadCustomPatterns() error {
 func newDetector() *analysis.Detector {
 	det := analysis.NewDetectorWithPatterns(customPatterns)
 	det.SetUARotationThreshold(flagUARotation)
+	// The detector IP working set is log-derived state too: keep it under
+	// the same global cardinality option. SetIPCap(0) means unlimited,
+	// matching --max-cardinality 0; the flag default equals the detector's
+	// own DefaultIPCap, so default runs behave exactly as before.
+	det.SetIPCap(flagMaxCard)
 	return det
+}
+
+// newWindowEngines builds a fresh HTTP + operational engine pair for one
+// analysis window and applies the global --max-cardinality configuration to
+// both. Every mode (one-shot, follow, --interval windows) and every window
+// reset MUST create its engines here, so a rebuilt engine can never silently
+// fall back to unbounded maps. Window resets naturally restore fresh
+// capacity while keeping the same configured limit.
+func newWindowEngines(filters types.Filters) (*analysis.Engine, *analysis.OperationalEngine) {
+	eng := analysis.New(filters)
+	eng.Stats().MaxCardinality = flagMaxCard
+	opEng := analysis.NewOperationalEngine(filters)
+	opEng.Stats().MaxCardinality = flagMaxCard
+	if flagDetect {
+		eng.SetDetector(newDetector())
+	}
+	return eng, opEng
 }
 
 func runAnalysis(cmd *cobra.Command, args []string) error {
@@ -375,13 +397,7 @@ func newRemoteExporter() (output.RemoteExporter, error) {
 }
 
 func runOnceMode(ctx context.Context, sources []types.LogSource, filters types.Filters) error {
-	engine := analysis.New(filters)
-	opEngine := analysis.NewOperationalEngine(filters)
-	if flagDetect {
-		det := newDetector()
-		engine.SetDetector(det)
-	}
-	engine.Stats().MaxCardinality = flagMaxCard
+	engine, opEngine := newWindowEngines(filters)
 	sections := types.DefaultTopSections()
 	var parseErrors, processed int64
 	var entries []*types.LogEntry
@@ -724,13 +740,7 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
 	// do not grow unbounded over a long follow session. Each window emits a
 	// fresh report.
 	const window = 5 * time.Minute
-	engine := analysis.New(filters)
-	opEngine := analysis.NewOperationalEngine(filters)
-	if flagDetect {
-		det := newDetector()
-		engine.SetDetector(det)
-	}
-	engine.Stats().MaxCardinality = flagMaxCard
+	engine, opEngine := newWindowEngines(filters)
 	windowStart := time.Now()
 	remote, err := newRemoteExporter()
 	if err != nil {
@@ -753,13 +763,8 @@ func runFollowMode(ctx context.Context, sources []types.LogSource, filters types
 	}
 
 	resetEngine := func() {
-		engine = analysis.New(filters)
-		opEngine = analysis.NewOperationalEngine(filters)
-		if flagDetect {
-			det := newDetector()
-			engine.SetDetector(det)
-		}
-		engine.Stats().MaxCardinality = flagMaxCard
+		// Same configuration, fresh window capacity.
+		engine, opEngine = newWindowEngines(filters)
 		windowStart = time.Now()
 	}
 
@@ -852,12 +857,9 @@ func runIntervalMode(ctx context.Context, sources []types.LogSource, filters typ
 	}
 
 	resetEngines := func() {
-		engine = analysis.New(filters)
-		opEngine = analysis.NewOperationalEngine(filters)
-		if flagDetect {
-			det := newDetector()
-			engine.SetDetector(det)
-		}
+		// Every interval window starts fresh but keeps the same
+		// --max-cardinality configuration via newWindowEngines.
+		engine, opEngine = newWindowEngines(filters)
 	}
 
 	for _, src := range sources {
@@ -952,7 +954,12 @@ func runWatch(ctx context.Context, sources []types.LogSource) error {
 		defer func() { _ = geoip.Close() }()
 	}
 
-	p := tea.NewProgram(tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns), tea.WithAltScreen())
+	model := tui.NewModelWithGeoIPAndPatterns(linesCh, geoip, customPatterns)
+	// The dashboard creates and rebuilds its own engines (manual [r] reset
+	// and the 5-minute auto reset); hand the global limit to the model so
+	// the initial engines and every rebuilt window honor it.
+	model.SetMaxCardinality(flagMaxCard)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

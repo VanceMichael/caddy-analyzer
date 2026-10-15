@@ -110,30 +110,36 @@ func (e *Engine) Process(entry *types.LogEntry) {
 		return
 	}
 
+	s := e.stats
+
 	if e.detector != nil {
 		if dets := e.detector.DetectAll(entry); len(dets) > 0 {
-			e.stats.SuspiciousIPs[entry.RemoteIP]++
-			for _, det := range dets {
-				detail := fmt.Sprintf("[%s] %s %s → %s", det.Type, det.Desc, entry.Method, entry.Path())
-				if len(e.stats.SuspiciousDetails[entry.RemoteIP]) < 10 {
-					e.stats.SuspiciousDetails[entry.RemoteIP] = append(e.stats.SuspiciousDetails[entry.RemoteIP], detail)
-				}
-				if len(e.stats.SuspiciousDetections[entry.RemoteIP]) < 50 {
-					e.stats.SuspiciousDetections[entry.RemoteIP] = append(e.stats.SuspiciousDetections[entry.RemoteIP], types.DetectionRecord{
-						Type:       string(det.Type),
-						Desc:       det.Desc,
-						Confidence: det.Confidence,
-						Method:     entry.Method,
-						URI:        entry.URI,
-						Status:     entry.Status,
-					})
+			// SuspiciousIPs is the dimension primary; SuspiciousDetails
+			// and SuspiciousDetections are companions. All three share
+			// one admission decision, so an IP rejected by the cardinality
+			// cap cannot leave detection details without a parent count.
+			if s.IncStrCount(s.SuspiciousIPs, entry.RemoteIP) {
+				for _, det := range dets {
+					detail := fmt.Sprintf("[%s] %s %s → %s", det.Type, det.Desc, entry.Method, entry.Path())
+					if len(s.SuspiciousDetails[entry.RemoteIP]) < 10 {
+						s.SuspiciousDetails[entry.RemoteIP] = append(s.SuspiciousDetails[entry.RemoteIP], detail)
+					}
+					if len(s.SuspiciousDetections[entry.RemoteIP]) < 50 {
+						s.SuspiciousDetections[entry.RemoteIP] = append(s.SuspiciousDetections[entry.RemoteIP], types.DetectionRecord{
+							Type:       string(det.Type),
+							Desc:       det.Desc,
+							Confidence: det.Confidence,
+							Method:     entry.Method,
+							URI:        entry.URI,
+							Status:     entry.Status,
+						})
+					}
 				}
 			}
 		}
 	}
 
 	e.entries++
-	s := e.stats
 	s.TotalRequests++
 
 	if !entry.Timestamp.IsZero() {
@@ -147,20 +153,23 @@ func (e *Engine) Process(entry *types.LogEntry) {
 
 	s.StatusCounts[entry.Status]++
 	s.IncStrCount(s.MethodCounts, entry.Method)
-	s.IncStrCount(s.PathCounts, entry.Path())
+	path := entry.Path()
+	s.IncStrCount(s.PathCounts, path)
 	s.IncStrCount(s.HostCounts, entry.Host)
 	s.IncStrCount(s.RemoteAddrCounts, entry.RemoteAddr)
 	s.IncStrCount(s.UserAgentCounts, entry.UserAgent)
 	s.TotalBytes += entry.Size
-	s.AddStrBytes(s.PathBytesMap, entry.Path(), entry.Size)
+	// Path bytes/errors are companion dimensions of PathCounts: they are
+	// only recorded for admitted paths.
+	s.AddStrBytesFor(s.PathCounts, s.PathBytesMap, path, entry.Size)
 
 	if entry.Proto != "" {
-		s.ProtoCounts[entry.Proto]++
+		s.IncStrCount(s.ProtoCounts, entry.Proto)
 	}
 	if entry.TLSVersion != "" {
-		s.TLSVersionCounts[entry.TLSVersion]++
+		s.IncStrCount(s.TLSVersionCounts, entry.TLSVersion)
 	} else {
-		s.TLSVersionCounts["Plain HTTP"]++
+		s.IncStrCount(s.TLSVersionCounts, "Plain HTTP")
 	}
 
 	if entry.IsBot {
@@ -180,18 +189,24 @@ func (e *Engine) Process(entry *types.LogEntry) {
 
 	if entry.RemoteIP != "" {
 		s.IncStrCount(s.RemoteIPCounts, entry.RemoteIP)
-		s.AddStrBytes(s.IPBytesMap, entry.RemoteIP, entry.Size)
+		s.AddStrBytesFor(s.RemoteIPCounts, s.IPBytesMap, entry.RemoteIP, entry.Size)
 	}
 
 	if entry.Geo.CountryCode != "" {
-		s.IncStrCount(s.CountryCounts, entry.Geo.CountryCode)
-		if entry.Geo.CountryName != "" {
-			s.CountryNames[entry.Geo.CountryCode] = entry.Geo.CountryName
+		// Country name is a companion of CountryCounts.
+		if s.IncStrCount(s.CountryCounts, entry.Geo.CountryCode) && entry.Geo.CountryName != "" {
+			types.SetValueFor(s.CountryCounts, s.CountryNames, entry.Geo.CountryCode, entry.Geo.CountryName)
 		}
 	}
 	if entry.Geo.City != "" {
-		s.IncStrCount(s.CityCounts, entry.Geo.City)
-		s.CityLocations[entry.Geo.City] = types.GeoLocation{Latitude: entry.Geo.Latitude, Longitude: entry.Geo.Longitude, Timezone: entry.Geo.Timezone}
+		// City location is a companion of CityCounts.
+		if s.IncStrCount(s.CityCounts, entry.Geo.City) {
+			types.SetValueFor(s.CityCounts, s.CityLocations, entry.Geo.City, types.GeoLocation{
+				Latitude:  entry.Geo.Latitude,
+				Longitude: entry.Geo.Longitude,
+				Timezone:  entry.Geo.Timezone,
+			})
+		}
 	}
 	if entry.Geo.ASN > 0 {
 		s.IncStrCount(s.ASNCounts, fmt.Sprintf("AS%d", entry.Geo.ASN))
@@ -199,7 +214,7 @@ func (e *Engine) Process(entry *types.LogEntry) {
 
 	if entry.Status >= 500 {
 		s.Errors++
-		s.IncStrCount(s.PathErrorCounts, entry.Path())
+		s.IncStrCountFor(s.PathCounts, s.PathErrorCounts, path)
 	}
 	switch {
 	case entry.Status >= 200 && entry.Status < 300:

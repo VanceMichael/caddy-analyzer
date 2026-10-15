@@ -43,9 +43,12 @@ func (e *OperationalEngine) Process(entry *types.OperationalEntry) {
 	}
 
 	lvl := entry.EffectiveLevel()
-	s.LevelCounts[lvl]++
-	s.LoggerCounts[entry.Logger]++
-	s.MsgCounts[entry.Msg]++
+	// Every operational string dimension (level, logger, message text)
+	// goes through the same cardinality gate as the HTTP counters. Global
+	// TotalEvents/Errors stay exact regardless of admission.
+	s.IncStrCount(s.LevelCounts, lvl)
+	s.IncStrCount(s.LoggerCounts, entry.Logger)
+	s.IncStrCount(s.MsgCounts, entry.Msg)
 	if lvl == "error" {
 		s.Errors++
 	}
